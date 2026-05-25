@@ -14,7 +14,7 @@ from torch import nn
 
 class AttentionLSTM(nn.Module):
     """
-    Input  : (batch, seq_len, input_size)  — per-user sequence of daily features
+    Input  : (batch, seq_len, input_size)  — per-user intraday feature sequence
     Output : (batch, seq_len, input_size)  — reconstructed sequence
              attn_weights (batch, seq_len, 1)
     """

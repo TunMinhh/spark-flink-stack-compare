@@ -1,0 +1,134 @@
+[preflight] Verifying Bronze / Silver / Gold jobs are RUNNING …
+  Found: insert-into_iceberg_cat.bronze.heart_rate_intraday,iceberg_cat.bronze.hrv_intraday,iceberg_cat.bronze.breathing_intraday | insert-into_iceberg_cat.silver.heart_rate_intraday,iceberg_cat.silver.hrv_intraday,iceberg_cat.silver.breathing_intraday | insert-into_iceberg_cat.gold.daily_intraday_summary
+  ✓ All 3 streaming jobs running.
+
+Pipeline B Benchmark — Flink streaming + Iceberg
+Request rates : [100] users/tick
+Warmup runs   : 1  Measured runs: 3
+Burst duration: 10s equivalent (100 fixed ticks)  Staleness poll: 5.0s
+Results  → benchmark/results_20260524_015253.csv
+Staleness → benchmark/staleness_20260524_015253.csv
+
+======================================================================
+[B] Run 1  ≈3000.0 req/s (WARMUP)
+======================================================================
+  [baseline] bronze=0 silver=0 gold=0 rows
+  [producer] PID=1309970  users_per_tick=100  delay=0.1s
+  [producer] Running fixed workload: 100 ticks …
+  [producer] Stopped at 12.51s — waiting for pipeline to catch up …
+    [stable] Bronze → 21.6s
+    [stable] Silver → 39.87s
+  [gold] Silver stable; waiting for Gold to drain (idle=45s, max=800s) …
+    [stable] Gold → 60.7s
+
+  ── Staleness (Gold during run) ──────────────────────────────
+     avg=18.73s  max=45.4s  min=0.1s
+  ── First-message latency ────────────────────────────────────
+     Gold first commit at 45.65s after producer start
+  ── Catch-up lag (after producer stop) ───────────────────────
+     Bronze=21.6s  Silver=39.87s  Gold=48.19s
+  ── Throughput (rows/s during burst) ─────────────────────────
+     Bronze=3000.0  Silver=3000.0
+  ── Integrity metrics ────────────────────────────────────────
+     actual_input=2398.1 rows/s  silver/bronze=1.0  catchup_ratio=4.82x
+  ── Gold refreshed: yes rows_current=0 ──
+  ── E2E=60.7s  rows added: b=30000 s=30000 gold_delta=0 ──
+
+======================================================================
+[B] Run 2  ≈3000.0 req/s
+======================================================================
+  [baseline] bronze=30000 silver=30000 gold=0 rows
+  [producer] PID=1313048  users_per_tick=100  delay=0.1s
+  [producer] Running fixed workload: 100 ticks …
+  [producer] Stopped at 11.9s — waiting for pipeline to catch up …
+    [stable] Bronze → 18.39s
+    [stable] Silver → 36.64s
+  [gold] Silver stable; waiting for Gold to drain (idle=45s, max=800s) …
+    [stable] Gold → 60.05s
+
+  ── Staleness (Gold during run) ──────────────────────────────
+     avg=40.75s  max=88.3s  min=3.1s
+  ── First-message latency ────────────────────────────────────
+     Gold first commit at 42.0s after producer start
+  ── Catch-up lag (after producer stop) ───────────────────────
+     Bronze=18.39s  Silver=36.65s  Gold=48.15s
+  ── Throughput (rows/s during burst) ─────────────────────────
+     Bronze=3000.0  Silver=3000.0
+  ── Integrity metrics ────────────────────────────────────────
+     actual_input=2521.0 rows/s  silver/bronze=1.0  catchup_ratio=4.81x
+  ── Gold refreshed: yes rows_current=0 ──
+  ── E2E=60.05s  rows added: b=30000 s=30000 gold_delta=0 ──
+
+======================================================================
+[B] Run 3  ≈3000.0 req/s
+======================================================================
+  [baseline] bronze=60000 silver=60000 gold=0 rows
+  [producer] PID=1315852  users_per_tick=100  delay=0.1s
+  [producer] Running fixed workload: 100 ticks …
+  [producer] Stopped at 12.06s — waiting for pipeline to catch up …
+    [stable] Bronze → 18.53s
+    [stable] Silver → 33.81s
+  [gold] Silver stable; waiting for Gold to drain (idle=45s, max=800s) …
+    [stable] Gold → 57.26s
+
+  ── Staleness (Gold during run) ──────────────────────────────
+     avg=37.66s  max=85.3s  min=1.2s
+  ── First-message latency ────────────────────────────────────
+     Gold first commit at 39.18s after producer start
+  ── Catch-up lag (after producer stop) ───────────────────────
+     Bronze=18.53s  Silver=33.81s  Gold=45.2s
+  ── Throughput (rows/s during burst) ─────────────────────────
+     Bronze=3000.0  Silver=3000.0
+  ── Integrity metrics ────────────────────────────────────────
+     actual_input=2487.6 rows/s  silver/bronze=1.0  catchup_ratio=4.52x
+  ── Gold refreshed: yes rows_current=149 ──
+  ── E2E=57.26s  rows added: b=30000 s=30000 gold_delta=149 ──
+
+======================================================================
+[B] Run 4  ≈3000.0 req/s
+======================================================================
+  [baseline] bronze=90000 silver=90000 gold=149 rows
+  [producer] PID=1318542  users_per_tick=100  delay=0.1s
+  [producer] Running fixed workload: 100 ticks …
+  [producer] Stopped at 12.05s — waiting for pipeline to catch up …
+    [stable] Bronze → 18.37s
+    [stable] Silver → 36.65s
+  [gold] Silver stable; waiting for Gold to drain (idle=45s, max=800s) …
+    [stable] Gold → 57.19s
+
+  ── Staleness (Gold during run) ──────────────────────────────
+     avg=40.31s  max=87.3s  min=3.4s
+  ── First-message latency ────────────────────────────────────
+     Gold first commit at 42.15s after producer start
+  ── Catch-up lag (after producer stop) ───────────────────────
+     Bronze=18.37s  Silver=36.65s  Gold=45.14s
+  ── Throughput (rows/s during burst) ─────────────────────────
+     Bronze=3000.0  Silver=3000.0
+  ── Integrity metrics ────────────────────────────────────────
+     actual_input=2489.6 rows/s  silver/bronze=1.0  catchup_ratio=4.51x
+  ── Gold refreshed: yes rows_current=296 ──
+  ── E2E=57.19s  rows added: b=30000 s=30000 gold_delta=147 ──
+
+--- Rate 100 users/tick (3000.0 req/s) ---
+  Gold E2E           : 58.2s
+  First-msg latency  : 41.1s  (producer start → first Gold commit)
+  Avg staleness      : 39.6s
+  Max staleness      : 87.0s
+  Bronze catch-up    : 18.4s
+  Silver catch-up    : 35.7s
+  Gold catch-up      : 46.2s
+  Actual input rps   : 2499.4 rows/s
+  Catch-up ratio     : 4.61x
+  Silver/Bronze      : 1.000
+  Bronze throughput  : 3000.0 rows/s
+  Silver throughput  : 3000.0 rows/s
+  Rows added         : bronze=30000 silver=30000
+  Gold refreshed     : 3/3 run(s)
+  Engine RAM peak    : 28877 MiB
+
+========================================================================================================================
+   req/s |      E2E |  1stLatency |  AvgStale |  MaxStale |  GoldLag | B rows/s | S rows/s |  B rows |  S rows | GoldOK |  EngineRAM
+------------------------------------------------------------------------------------------------------------------------
+  3000.0 |    58.2s |       41.1s |     39.6s |     87.0s |    46.2s |   3000.0 |   3000.0 |   30000 |   30000 |    3/3 |   28877MiB
+
+Done. Results → benchmark/results_20260524_015253.csv  Staleness → benchmark/staleness_20260524_015253.csv

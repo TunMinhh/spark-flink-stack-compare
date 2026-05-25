@@ -1,0 +1,6 @@
+# Shared Python dependencies for the local pipeline scripts.
+
+confluent-kafka==2.5.0
+pyspark==3.5.1
+delta-spark==3.2.0
+requests==2.32.3

@@ -1,0 +1,7 @@
+# Host-side dependencies (producer, benchmark, validate)
+# Install into a venv:  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+confluent-kafka==2.3.0
+requests==2.31.0
+pandas==2.2.1
+psycopg2-binary==2.9.9

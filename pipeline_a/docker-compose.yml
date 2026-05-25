@@ -1,0 +1,334 @@
+services:
+  # ===== HDFS =====
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    environment:
+      - CLUSTER_NAME=basePipeline-cluster
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_replication=1
+      - HDFS_CONF_dfs_namenode_replication_min=1
+      - HDFS_CONF_dfs_namenode_safemode_threshold_pct=0.0
+      - HADOOP_HEAPSIZE=3072
+    ports:
+      - "127.0.0.1:9870:9870"   # HDFS NameNode UI
+      - "127.0.0.1:9000:9000"   # HDFS RPC (only needed if connecting from host)
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    mem_limit: 4g         # NameNode metadata + RPC headroom for Delta commits
+    memswap_limit: 4g     # disable swap — OOM is preferable to swap thrash
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9870/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_replication=1
+      - HADOOP_HEAPSIZE=2048
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    depends_on:
+      namenode:
+        condition: service_healthy
+    mem_limit: 3g         # block transfer buffers + JVM GC headroom
+    memswap_limit: 3g
+    restart: unless-stopped
+
+  # ===== Kafka (KRaft mode, no ZooKeeper) =====
+  kafka:
+    image: apache/kafka:3.7.0
+    hostname: kafka
+    user: "root"  # workaround for log-dir permission issues
+    environment:
+      - KAFKA_NODE_ID=1
+      - KAFKA_PROCESS_ROLES=broker,controller
+      - KAFKA_LISTENERS=CONTROLLER://:29093,PLAINTEXT_HOST://:9092,PLAINTEXT://:19092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT_HOST://127.0.0.1:9092,PLAINTEXT://kafka:19092
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:29093
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+      - KAFKA_LOG_DIRS=/tmp/kraft-combined-logs
+      - CLUSTER_ID=${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}
+      # Heap sized for 11 topics with the benchmark partition profile.
+      # Remaining container memory serves OS page cache, Kafka's hot path.
+      - KAFKA_JVM_PERFORMANCE_OPTS=-Xmx2g -Xms1g
+    ports:
+      - "127.0.0.1:9092:9092"   # Kafka broker — producers must run on the same host, or use SSH tunnel
+    volumes:
+      - kafka_data:/tmp/kraft-combined-logs
+    mem_limit: 3g
+    memswap_limit: 3g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "cd /opt/kafka/bin && ./kafka-topics.sh --bootstrap-server localhost:19092 --list >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ===== Spark =====
+  spark-master:
+    image: apache/spark:3.5.1
+    user: "root"
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--host", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:7077:7077"   # Spark master RPC
+      - "127.0.0.1:8080:8080"   # Spark master UI
+    volumes:
+      - ./processing:/opt/spark/work-dir
+      - spark_ivy_cache:/tmp/.ivy2
+    # master daemon + three streaming driver processes + runtime headroom
+    mem_limit: 6g
+    memswap_limit: 6g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  spark-worker:
+    image: apache/spark:3.5.1
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    volumes:
+      - ./processing:/opt/spark/work-dir
+    # Streaming engine memory budget across three concurrent jobs:
+    #   Bronze executor + overhead : 5g
+    #   Silver executor + overhead : 10g
+    #   Gold executor + overhead   : 15g
+    #   total Spark executor budget: 30g
+    #
+    # The container cap includes runtime headroom for the Spark worker daemon,
+    # JVM non-heap memory, Python/JVM overhead, Netty, and HDFS/Delta buffers.
+    # Keep the engine budget matched to Flink; do not use the Docker cap as
+    # the benchmark memory budget.
+    mem_limit: 40g
+    memswap_limit: 40g
+    restart: unless-stopped
+
+  # ===== PostgreSQL (MLflow metadata DB) =====
+  postgres:
+    image: postgres:13-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
+    ports:
+      - "127.0.0.1:5433:5432"   # Postgres — host 5433 (5432 collides with a locally-installed Postgres)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    mem_limit: 384m       # MLflow metadata
+    memswap_limit: 384m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # One-shot: create mlflow_db in the shared postgres instance.
+  postgres-init:
+    image: postgres:13-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - PGPASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - PGUSER=${POSTGRES_USER:-postgres}
+      - PGDATABASE=${POSTGRES_DB:-postgres}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        psql -h postgres -tc "SELECT 1 FROM pg_database WHERE datname='mlflow_db'" | grep -q 1 \
+        || psql -h postgres -c 'CREATE DATABASE mlflow_db'
+        echo '[postgres-init] mlflow_db ready.'
+    restart: "no"
+
+  # ===== MinIO (S3-compatible artifact storage for MLflow) =====
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin123}
+    ports:
+      - "127.0.0.1:9100:9000"   # MinIO S3 API (9000 conflicts with HDFS namenode on host)
+      - "127.0.0.1:9101:9001"   # MinIO Web console
+    volumes:
+      - minio_data:/data
+    mem_limit: 512m
+    memswap_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local 2>/dev/null || curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # One-shot: create the "mlflow" bucket inside MinIO.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin123}
+    entrypoint: >
+      sh -c "
+        until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do
+          echo '[minio-init] waiting for MinIO...' && sleep 2;
+        done;
+        mc mb --ignore-existing local/mlflow;
+        echo '[minio-init] mlflow bucket ready.'
+      "
+    restart: "no"
+
+  # ===== MLflow (experiment tracking + model registry) =====
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.10.2
+    command:
+      - bash
+      - -c
+      - |
+          pip install --quiet psycopg2-binary boto3 >/dev/null 2>&1 &&
+          exec mlflow server \
+            --host 0.0.0.0 \
+            --port 5000 \
+            --backend-store-uri "postgresql+psycopg2://$$POSTGRES_USER:$$POSTGRES_PASSWORD@postgres:5432/mlflow_db" \
+            --default-artifact-root s3://mlflow/
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-minioadmin123}
+    ports:
+      - "127.0.0.1:5000:5000"   # MLflow UI + API
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    mem_limit: 1g
+    memswap_limit: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health').read()\" || exit 1"]
+      start_period: 60s
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  # ===== FastAPI (AttentionLSTM training + inference) =====
+  fastapi:
+    build: ./ml_module
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-minioadmin123}
+      - HDFS_SILVER_BASE=hdfs://namenode:9000/data/silver/wearable
+      - HDFS_GOLD_BASE=hdfs://namenode:9000/data/gold/wearable
+      - MLFLOW_EXPERIMENT=${MLFLOW_EXPERIMENT:-intraday-anomaly-detector}
+      - MLFLOW_MODEL_NAME=${MLFLOW_MODEL_NAME:-intraday-attention-lstm}
+      - AI_SEQ_LEN=${AI_SEQ_LEN:-30}
+      - AI_MIN_WINDOWS=${AI_MIN_WINDOWS:-50}
+      - AI_HIDDEN_SIZE=${AI_HIDDEN_SIZE:-64}
+      - AI_NUM_LAYERS=${AI_NUM_LAYERS:-2}
+      - AI_BATCH_SIZE=${AI_BATCH_SIZE:-64}
+      - AI_LR=${AI_LR:-0.001}
+      - AI_THRESH_GREEN=${AI_THRESH_GREEN:-1.04}
+      - AI_THRESH_YELLOW=${AI_THRESH_YELLOW:-1.29}
+      - AI_THRESH_RED=${AI_THRESH_RED:-1.65}
+      - EPOCHS=${EPOCHS:-15}
+    ports:
+      - "127.0.0.1:8000:8000"   # FastAPI — /train, /predict, /health
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    mem_limit: 512m            # FastAPI serving only — no ML for benchmark
+    memswap_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"]
+      start_period: 60s
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ===== PostgreSQL SINK (Gold -> Grafana datasource) =====
+  # Separate from the MLflow Postgres so dashboard query load can't
+  # impact experiment metadata.
+  postgres-sink:
+    image: postgres:13-alpine
+    environment:
+      - POSTGRES_USER=${PG_SINK_USER:-grafana}
+      - POSTGRES_PASSWORD=${PG_SINK_PASSWORD:-grafana123}
+      - POSTGRES_DB=${PG_SINK_DB:-wellness}
+    ports:
+      - "127.0.0.1:5434:5432"   # Postgres sink — host 5434 (5433 is the MLflow Postgres)
+    volumes:
+      - postgres_sink_data:/var/lib/postgresql/data
+    mem_limit: 384m
+    memswap_limit: 384m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_SINK_USER:-grafana} -d ${PG_SINK_DB:-wellness}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== Grafana (dashboards over the Postgres sink) =====
+  grafana:
+    image: grafana/grafana:10.4.2
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      # Variables substituted into provisioning/datasources/postgres.yml
+      - PG_SINK_USER=${PG_SINK_USER:-grafana}
+      - PG_SINK_PASSWORD=${PG_SINK_PASSWORD:-grafana123}
+      - PG_SINK_DB=${PG_SINK_DB:-wellness}
+    ports:
+      - "127.0.0.1:3000:3000"   # Grafana UI
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      postgres-sink:
+        condition: service_healthy
+    mem_limit: 512m
+    memswap_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/api/health || exit 1"]
+      start_period: 30s
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  spark_ivy_cache:
+  namenode_data:
+  datanode_data:
+  postgres_data:
+  postgres_sink_data:
+  kafka_data:
+  minio_data:
+  grafana_data:

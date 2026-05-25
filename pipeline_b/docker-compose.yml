@@ -1,0 +1,347 @@
+services:
+  # ===== Kafka (KRaft mode, no ZooKeeper) =====
+  kafka:
+    image: apache/kafka:3.7.0
+    hostname: kafka
+    user: "root"  # workaround for log-dir permission issues
+    environment:
+      - KAFKA_NODE_ID=1
+      - KAFKA_PROCESS_ROLES=broker,controller
+      - KAFKA_LISTENERS=CONTROLLER://:29093,PLAINTEXT_HOST://:9092,PLAINTEXT://:19092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT_HOST://127.0.0.1:9092,PLAINTEXT://kafka:19092
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:29093
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+      - KAFKA_LOG_DIRS=/tmp/kraft-combined-logs
+      - CLUSTER_ID=${KAFKA_CLUSTER_ID}
+      - KAFKA_JVM_PERFORMANCE_OPTS=-Xmx2g -Xms1g
+    ports:
+      - "127.0.0.1:9092:9092"
+    volumes:
+      - kafka_data:/tmp/kraft-combined-logs
+    mem_limit: 3g
+    memswap_limit: 3g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "cd /opt/kafka/bin && ./kafka-topics.sh --bootstrap-server localhost:19092 --list >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ===== MinIO (S3-compatible storage — MLflow artifacts + Iceberg warehouse) =====
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:9100:9000"   # MinIO S3 API
+      - "127.0.0.1:9101:9001"   # MinIO Web console
+    volumes:
+      - minio_data:/data
+    mem_limit: 4g
+    memswap_limit: 4g
+    restart: unless-stopped
+    # No healthcheck — latest MinIO image is distroless (no curl/wget).
+    # minio-init and iceberg-rest use service_started and retry internally.
+
+  # One-shot: create mlflow + iceberg buckets.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    entrypoint: >
+      sh -c "
+        until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do
+          echo '[minio-init] waiting for MinIO...' && sleep 2;
+        done;
+        mc mb --ignore-existing local/mlflow;
+        mc mb --ignore-existing local/iceberg;
+        echo '[minio-init] buckets ready: mlflow, iceberg'
+      "
+    restart: "no"
+
+  # ===== Iceberg REST Catalog (backed by MinIO/S3) =====
+  iceberg-rest:
+    image: tabulario/iceberg-rest:0.10.0
+    environment:
+      - CATALOG_WAREHOUSE=s3://iceberg/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+      - CATALOG_S3_PATH__STYLE__ACCESS=true
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      - AWS_REGION=us-east-1
+      # Use PostgreSQL instead of H2 in-memory to avoid concurrent-write conflicts
+      - CATALOG_URI=jdbc:postgresql://postgres:5432/iceberg_catalog
+      - CATALOG_JDBC_USER=${POSTGRES_USER}
+      - CATALOG_JDBC_PASSWORD=${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:8181:8181"   # Iceberg REST catalog API
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    mem_limit: 2g
+    memswap_limit: 2g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8181' 2>/dev/null"]
+      start_period: 15s
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ===== Flink =====
+  flink-jobmanager:
+    build: ./flink
+    command: jobmanager
+    environment:
+      ENABLE_BUILT_IN_PLUGINS: flink-s3-fs-hadoop-1.19.3.jar
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        cluster.fine-grained-resource-management.enabled: false
+        s3.endpoint: http://minio:9000
+        s3.access-key: ${MINIO_ROOT_USER}
+        s3.secret-key: ${MINIO_ROOT_PASSWORD}
+        s3.path.style.access: true
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+    ports:
+      - "127.0.0.1:8082:8081"   # Flink Web UI
+    volumes:
+      - ./processing:/opt/flink/work-dir
+    # jobmanager process + REST server + driver overhead
+    mem_limit: 2g
+    memswap_limit: 2g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/overview || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  flink-taskmanager:
+    build: ./flink
+    command: taskmanager
+    environment:
+      ENABLE_BUILT_IN_PLUGINS: flink-s3-fs-hadoop-1.19.3.jar
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        cluster.fine-grained-resource-management.enabled: false
+        taskmanager.numberOfTaskSlots: 18
+        taskmanager.memory.process.size: 32768m
+        # Iceberg streaming uses heap buffers, not managed memory (RocksDB/sort).
+        # Reduce managed fraction 40%->5% so task heap gets most of the 32g process.
+        # Total stays at 32768m, comparable to Pipeline A's Spark engine budget.
+        taskmanager.memory.managed.fraction: 0.05
+        taskmanager.memory.jvm-metaspace.size: 512m
+        # Increase heartbeat timeout so GC pauses don't cause TM disconnection
+        heartbeat.timeout: 120000
+        heartbeat.interval: 10000
+        # Allow more time for slot acquisition during restart
+        slot.request.timeout: 60000
+        s3.endpoint: http://minio:9000
+        s3.access-key: ${MINIO_ROOT_USER}
+        s3.secret-key: ${MINIO_ROOT_PASSWORD}
+        s3.path.style.access: true
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+    volumes:
+      - ./processing:/opt/flink/work-dir
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    # Engine memory budget is taskmanager.memory.process.size=32768m.
+    # The container cap includes runtime headroom, matching Pipeline A's
+    # "30g engine budget + Docker headroom" setup.
+    mem_limit: 40g
+    memswap_limit: 40g
+    restart: unless-stopped
+
+  # ===== PostgreSQL (MLflow + Iceberg metadata DB) =====
+  postgres:
+    image: postgres:13-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    mem_limit: 1g
+    memswap_limit: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres-init:
+    image: postgres:13-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - PGPASSWORD=${POSTGRES_PASSWORD}
+      - PGUSER=${POSTGRES_USER}
+      - PGDATABASE=${POSTGRES_DB}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        psql -h postgres -tc "SELECT 1 FROM pg_database WHERE datname='mlflow_db'" | grep -q 1 \
+        || psql -h postgres -c 'CREATE DATABASE mlflow_db'
+        psql -h postgres -tc "SELECT 1 FROM pg_database WHERE datname='iceberg_catalog'" | grep -q 1 \
+        || psql -h postgres -c 'CREATE DATABASE iceberg_catalog'
+        echo '[postgres-init] mlflow_db and iceberg_catalog ready.'
+    restart: "no"
+
+  # ===== MLflow =====
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.10.2
+    command:
+      - bash
+      - -c
+      - |
+          pip install --quiet psycopg2-binary boto3 >/dev/null 2>&1 &&
+          exec mlflow server \
+            --host 0.0.0.0 \
+            --port 5000 \
+            --backend-store-uri "postgresql+psycopg2://$$POSTGRES_USER:$$POSTGRES_PASSWORD@postgres:5432/mlflow_db" \
+            --default-artifact-root s3://mlflow/
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    ports:
+      - "127.0.0.1:5000:5000"
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    mem_limit: 1g
+    memswap_limit: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health').read()\" || exit 1"]
+      start_period: 60s
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  # ===== FastAPI (AttentionLSTM training + inference) =====
+  fastapi:
+    build: ./ml_module
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      # Silver and Gold are now Iceberg tables on MinIO; ml_module reads via PyIceberg
+      - ICEBERG_CATALOG_URI=http://iceberg-rest:8181
+      - S3_ENDPOINT=http://minio:9000
+      - ICEBERG_SILVER_NS=silver
+      - ICEBERG_GOLD_NS=gold
+      - MLFLOW_EXPERIMENT=${MLFLOW_EXPERIMENT:-intraday-anomaly-detector}
+      - MLFLOW_MODEL_NAME=${MLFLOW_MODEL_NAME:-intraday-attention-lstm}
+      - AI_SEQ_LEN=${AI_SEQ_LEN:-30}
+      - AI_MIN_WINDOWS=${AI_MIN_WINDOWS:-50}
+      - AI_HIDDEN_SIZE=${AI_HIDDEN_SIZE:-64}
+      - AI_NUM_LAYERS=${AI_NUM_LAYERS:-2}
+      - AI_BATCH_SIZE=${AI_BATCH_SIZE:-64}
+      - AI_LR=${AI_LR:-0.001}
+      - AI_THRESH_GREEN=${AI_THRESH_GREEN:-1.04}
+      - AI_THRESH_YELLOW=${AI_THRESH_YELLOW:-1.29}
+      - AI_THRESH_RED=${AI_THRESH_RED:-1.65}
+      - EPOCHS=${EPOCHS:-15}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      iceberg-rest:
+        condition: service_healthy
+    mem_limit: 512m
+    memswap_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"]
+      start_period: 60s
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ===== PostgreSQL SINK (Gold -> Grafana datasource) =====
+  postgres-sink:
+    image: postgres:13-alpine
+    environment:
+      - POSTGRES_USER=${PG_SINK_USER:-grafana}
+      - POSTGRES_PASSWORD=${PG_SINK_PASSWORD:-grafana123}
+      - POSTGRES_DB=${PG_SINK_DB:-wellness}
+    ports:
+      - "127.0.0.1:5435:5432"   # 5435 so pipeline_a (5434) can run simultaneously
+    volumes:
+      - postgres_sink_data:/var/lib/postgresql/data
+    mem_limit: 384m
+    memswap_limit: 384m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_SINK_USER} -d ${PG_SINK_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== Grafana =====
+  grafana:
+    image: grafana/grafana:10.4.2
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - PG_SINK_USER=${PG_SINK_USER:-grafana}
+      - PG_SINK_PASSWORD=${PG_SINK_PASSWORD:-grafana123}
+      - PG_SINK_DB=${PG_SINK_DB:-wellness}
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      postgres-sink:
+        condition: service_healthy
+    mem_limit: 512m
+    memswap_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/api/health || exit 1"]
+      start_period: 30s
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  postgres_data:
+  postgres_sink_data:
+  kafka_data:
+  minio_data:
+  grafana_data:

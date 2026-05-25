@@ -1,0 +1,44 @@
+# ── Secrets & config ──────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Data files (large CSVs symlinked from pipeline_a) ─────────────────────────
+*.csv
+*.csv:Zone.Identifier
+data/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# ── Benchmark output ──────────────────────────────────────────────────────────
+benchmark/results_*.csv
+benchmark/*.log
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+*.tmp
+
+# ── Flink job artifacts ───────────────────────────────────────────────────────
+flink-*.jar
+*.jar
+
+# ── Editor & OS ───────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.bak
+*.orig
+.DS_Store
+*.Zone.Identifier
+*:Zone.Identifier
+
+# ── Claude ────────────────────────────────────────────────────────────────────
+.claude/

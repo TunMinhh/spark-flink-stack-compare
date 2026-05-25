@@ -1,0 +1,153 @@
+[preflight] Verifying Spark streaming jobs are running ...
+  OK spark_bronze.py
+  OK spark_silver_streaming.py
+  OK spark_gold_streaming.py
+
+Pipeline A Benchmark - Spark Structured Streaming + Delta Lake
+Request rates : [100] users/tick
+Warmup runs   : 1  Measured runs: 3
+Burst duration: 10s equivalent (100 fixed ticks)
+Results       : benchmark/results_20260523_234432.csv
+Staleness     : benchmark/staleness_20260523_234432.csv
+
+======================================================================
+[A] Run 1 approx 3000.0 req/s (WARMUP)
+======================================================================
+  [baseline] bronze=0 silver=0 gold=0 rows
+  [producer] PID=241448 users_per_tick=100 delay=0.1s
+  [producer] Running fixed workload: 100 ticks ...
+[realtime-producer] Kafka: 127.0.0.1:9092  delay: 0.1s/tick
+[realtime-producer] Loaded 7410 daily (user, date) entries
+[realtime-producer] Pool size: 159508 entries across 71 users
+[realtime-producer] Emitting 100 user(s) per tick
+[realtime-producer] Fixed workload: 100 tick(s)
+[realtime-producer] Reached MAX_TICKS=100
+[realtime-producer] Done. Total ticks: 100
+  [producer] Stopped at 12.31s; waiting for Delta commits to stabilise ...
+    [Bronze] waiting (35.5s): {'heart_rate_intraday': (0, 'no-commit'), 'hrv_intraday': (0, 'no-commit'), 'breathing_intraday': (0, 'no-commit')}
+    [Silver] waiting (42.2s): {'heart_rate_intraday': (0, 'no-commit'), 'hrv_intraday': (0, 'no-commit'), 'breathing_intraday': (0, 'no-commit')}
+    [Silver] waiting (135.6s): {'heart_rate_intraday': (10000, 'no-commit'), 'hrv_intraday': (0, 'no-commit'), 'breathing_intraday': (0, 'no-commit')}
+    [stable] Bronze -> 278.76s
+    [stable] Silver -> 340.72s
+  [gold] Silver stable; waiting for Gold to drain backlog (idle=75s, max=800s) ...
+    [stable] Gold -> 193.71s
+
+  Staleness avg=100.8s max=240.7s min=6.3s
+  First Gold commit: 17.73s
+  Catch-up lag: Bronze=278.76s Silver=340.72s Gold=181.4s
+  Throughput rows/s: Bronze=3000.0 Silver=3000.0
+  Integrity metrics: actual_input=2437.0 rows/s silver/bronze=1.0 catchup_ratio=34.07x
+  Gold refreshed: yes rows_current=436
+  E2E=353.03s rows added: b=30000 s=30000 gold_delta=436
+
+======================================================================
+[A] Run 2 approx 3000.0 req/s
+======================================================================
+  [baseline] bronze=30000 silver=30000 gold=436 rows
+  [producer] PID=330700 users_per_tick=100 delay=0.1s
+  [producer] Running fixed workload: 100 ticks ...
+[realtime-producer] Kafka: 127.0.0.1:9092  delay: 0.1s/tick
+[realtime-producer] Loaded 7410 daily (user, date) entries
+[realtime-producer] Pool size: 159508 entries across 71 users
+[realtime-producer] Emitting 100 user(s) per tick
+[realtime-producer] Fixed workload: 100 tick(s)
+[realtime-producer] Reached MAX_TICKS=100
+[realtime-producer] Done. Total ticks: 100
+  [producer] Stopped at 11.95s; waiting for Delta commits to stabilise ...
+    [Silver] waiting (49.0s): {'heart_rate_intraday': (0, 'no-commit'), 'hrv_intraday': (0, 'no-commit'), 'breathing_intraday': (0, 'no-commit')}
+    [Bronze] waiting (49.2s): {'heart_rate_intraday': (0, 'no-commit'), 'hrv_intraday': (0, 'no-commit'), 'breathing_intraday': (4200, 'no-commit')}
+    [stable] Bronze -> 359.38s
+    [stable] Silver -> 425.6s
+  [gold] Silver stable; waiting for Gold to drain backlog (idle=75s, max=800s) ...
+    [stable] Gold -> 210.57s
+
+  Staleness avg=239.33s max=563.9s min=5.5s
+  First Gold commit: 158.22s
+  Catch-up lag: Bronze=359.38s Silver=425.6s Gold=198.62s
+  Throughput rows/s: Bronze=3000.0 Silver=3000.0
+  Integrity metrics: actual_input=2510.5 rows/s silver/bronze=1.0 catchup_ratio=42.56x
+  Gold refreshed: yes rows_current=436
+  E2E=437.55s rows added: b=30000 s=30000 gold_delta=0
+
+======================================================================
+[A] Run 3 approx 3000.0 req/s
+======================================================================
+  [baseline] bronze=60000 silver=60000 gold=436 rows
+  [producer] PID=440715 users_per_tick=100 delay=0.1s
+  [producer] Running fixed workload: 100 ticks ...
+[realtime-producer] Kafka: 127.0.0.1:9092  delay: 0.1s/tick
+[realtime-producer] Loaded 7410 daily (user, date) entries
+[realtime-producer] Pool size: 159508 entries across 71 users
+[realtime-producer] Emitting 100 user(s) per tick
+[realtime-producer] Fixed workload: 100 tick(s)
+[realtime-producer] Reached MAX_TICKS=100
+[realtime-producer] Done. Total ticks: 100
+  [producer] Stopped at 11.85s; waiting for Delta commits to stabilise ...
+    [Bronze] waiting (61.7s): {'heart_rate_intraday': (0, 'no-commit'), 'hrv_intraday': (0, 'no-commit'), 'breathing_intraday': (10000, 'no-commit')}
+    [Silver] waiting (62.1s): {'heart_rate_intraday': (0, 'no-commit'), 'hrv_intraday': (0, 'no-commit'), 'breathing_intraday': (0, 'no-commit')}
+    [Bronze] waiting (128.7s): {'heart_rate_intraday': (0, 'no-commit'), 'hrv_intraday': (10000, 'commit'), 'breathing_intraday': (10000, 'commit')}
+    [Silver] waiting (129.1s): {'heart_rate_intraday': (0, 'no-commit'), 'hrv_intraday': (0, 'no-commit'), 'breathing_intraday': (10000, 'no-commit')}
+    [stable] Bronze -> 405.03s
+    [stable] Silver -> 414.12s
+  [gold] Silver stable; waiting for Gold to drain backlog (idle=75s, max=800s) ...
+    [stable] Gold -> 201.09s
+
+  Staleness avg=309.15s max=718.0s min=6.2s
+  First Gold commit: 171.38s
+  Catch-up lag: Bronze=405.03s Silver=414.12s Gold=189.24s
+  Throughput rows/s: Bronze=3000.0 Silver=3000.0
+  Integrity metrics: actual_input=2531.6 rows/s silver/bronze=1.0 catchup_ratio=41.41x
+  Gold refreshed: yes rows_current=436
+  E2E=425.97s rows added: b=30000 s=30000 gold_delta=0
+
+======================================================================
+[A] Run 4 approx 3000.0 req/s
+======================================================================
+  [baseline] bronze=90000 silver=90000 gold=436 rows
+  [producer] PID=552166 users_per_tick=100 delay=0.1s
+  [producer] Running fixed workload: 100 ticks ...
+[realtime-producer] Kafka: 127.0.0.1:9092  delay: 0.1s/tick
+[realtime-producer] Loaded 7410 daily (user, date) entries
+[realtime-producer] Pool size: 159508 entries across 71 users
+[realtime-producer] Emitting 100 user(s) per tick
+[realtime-producer] Fixed workload: 100 tick(s)
+[realtime-producer] Reached MAX_TICKS=100
+[realtime-producer] Done. Total ticks: 100
+  [producer] Stopped at 11.95s; waiting for Delta commits to stabilise ...
+    [Bronze] waiting (67.5s): {'heart_rate_intraday': (0, 'no-commit'), 'hrv_intraday': (0, 'no-commit'), 'breathing_intraday': (0, 'no-commit')}
+    [Silver] waiting (69.7s): {'heart_rate_intraday': (0, 'no-commit'), 'hrv_intraday': (0, 'no-commit'), 'breathing_intraday': (0, 'no-commit')}
+    [Silver] waiting (145.1s): {'heart_rate_intraday': (0, 'no-commit'), 'hrv_intraday': (10000, 'no-commit'), 'breathing_intraday': (0, 'no-commit')}
+    [stable] Bronze -> 371.92s
+    [stable] Silver -> 453.29s
+  [gold] Silver stable; waiting for Gold to drain backlog (idle=75s, max=800s) ...
+    [stable] Gold -> 172.16s
+
+  Staleness avg=301.14s max=719.3s min=6.9s
+  First Gold commit: 141.87s
+  Catch-up lag: Bronze=371.92s Silver=453.29s Gold=160.21s
+  Throughput rows/s: Bronze=3000.0 Silver=3000.0
+  Integrity metrics: actual_input=2510.5 rows/s silver/bronze=1.0 catchup_ratio=45.33x
+  Gold refreshed: yes rows_current=436
+  E2E=465.24s rows added: b=30000 s=30000 gold_delta=0
+
+--- Rate 100 users/tick (3000.0 req/s) ---
+  Gold E2E          : 442.9s
+  First-msg latency : 157.2s
+  Avg staleness     : 283.2s
+  Max staleness     : 667.1s
+  Gold catch-up     : 182.7s
+  Actual input rps  : 2517.5 rows/s
+  Catch-up ratio    : 43.10x
+  Silver/Bronze     : 1.000
+  Bronze throughput : 3000.0 rows/s
+  Silver throughput : 3000.0 rows/s
+  Rows added        : bronze=30000 silver=30000
+  Gold refreshed    : 3/3 run(s)
+  Engine RAM peak   : 9916 MiB
+
+========================================================================================================================
+   req/s |      E2E |  1stLatency |  AvgStale |  MaxStale |  GoldLag | B rows/s | S rows/s |  B rows |  S rows | GoldOK |  EngineRAM
+------------------------------------------------------------------------------------------------------------------------
+  3000.0 |   442.9s |      157.2s |    283.2s |    667.1s |   182.7s |   3000.0 |   3000.0 |   30000 |   30000 |    3/3 |    9916MiB
+
+Done. Results -> benchmark/results_20260523_234432.csv  Staleness -> benchmark/staleness_20260523_234432.csv

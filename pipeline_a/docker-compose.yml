@@ -8,14 +8,14 @@ services:
       - HDFS_CONF_dfs_replication=1
       - HDFS_CONF_dfs_namenode_replication_min=1
       - HDFS_CONF_dfs_namenode_safemode_threshold_pct=0.0
-      - HADOOP_HEAPSIZE=3072
+      - HADOOP_HEAPSIZE=768
     ports:
       - "127.0.0.1:9870:9870"   # HDFS NameNode UI
       - "127.0.0.1:9000:9000"   # HDFS RPC (only needed if connecting from host)
     volumes:
       - namenode_data:/hadoop/dfs/name
-    mem_limit: 4g         # NameNode metadata + RPC headroom for Delta commits
-    memswap_limit: 4g     # disable swap — OOM is preferable to swap thrash
+    mem_limit: 1g         # NameNode metadata + RPC headroom for local Delta commits
+    memswap_limit: 1g     # disable swap — OOM is preferable to swap thrash
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:9870/ || exit 1"]
@@ -28,14 +28,14 @@ services:
     environment:
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
       - HDFS_CONF_dfs_replication=1
-      - HADOOP_HEAPSIZE=2048
+      - HADOOP_HEAPSIZE=1536
     volumes:
       - datanode_data:/hadoop/dfs/data
     depends_on:
       namenode:
         condition: service_healthy
-    mem_limit: 3g         # block transfer buffers + JVM GC headroom
-    memswap_limit: 3g
+    mem_limit: 2g         # block transfer buffers + JVM GC headroom
+    memswap_limit: 2g
     restart: unless-stopped
 
   # ===== Kafka (KRaft mode, no ZooKeeper) =====
@@ -58,7 +58,7 @@ services:
       - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
       - KAFKA_LOG_DIRS=/tmp/kraft-combined-logs
       - CLUSTER_ID=${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}
-      # Heap sized for 11 topics with the benchmark partition profile.
+      # Heap sized for the realtime benchmark partition profile.
       # Remaining container memory serves OS page cache, Kafka's hot path.
       - KAFKA_JVM_PERFORMANCE_OPTS=-Xmx2g -Xms1g
     ports:
@@ -86,8 +86,8 @@ services:
       - ./processing:/opt/spark/work-dir
       - spark_ivy_cache:/tmp/.ivy2
     # master daemon + three streaming driver processes + runtime headroom
-    mem_limit: 6g
-    memswap_limit: 6g
+    mem_limit: 4g
+    memswap_limit: 4g
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
@@ -104,17 +104,17 @@ services:
     volumes:
       - ./processing:/opt/spark/work-dir
     # Streaming engine memory budget across three concurrent jobs:
-    #   Bronze executor + overhead : 5g
-    #   Silver executor + overhead : 10g
-    #   Gold executor + overhead   : 15g
-    #   total Spark executor budget: 30g
+    #   Bronze executor + overhead : 3g
+    #   Silver executor + overhead : 6g
+    #   Gold executor + overhead   : 9g
+    #   total Spark executor budget: 18g
     #
     # The container cap includes runtime headroom for the Spark worker daemon,
     # JVM non-heap memory, Python/JVM overhead, Netty, and HDFS/Delta buffers.
     # Keep the engine budget matched to Flink; do not use the Docker cap as
     # the benchmark memory budget.
-    mem_limit: 40g
-    memswap_limit: 40g
+    mem_limit: 24g
+    memswap_limit: 24g
     restart: unless-stopped
 
   # ===== PostgreSQL (MLflow metadata DB) =====
@@ -128,8 +128,8 @@ services:
       - "127.0.0.1:5433:5432"   # Postgres — host 5433 (5432 collides with a locally-installed Postgres)
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    mem_limit: 384m       # MLflow metadata
-    memswap_limit: 384m
+    mem_limit: 1g         # MLflow metadata
+    memswap_limit: 1g
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
@@ -168,8 +168,8 @@ services:
       - "127.0.0.1:9101:9001"   # MinIO Web console
     volumes:
       - minio_data:/data
-    mem_limit: 512m
-    memswap_limit: 512m
+    mem_limit: 1g
+    memswap_limit: 1g
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "mc ready local 2>/dev/null || curl -fsS http://localhost:9000/minio/health/live || exit 1"]
@@ -261,8 +261,8 @@ services:
         condition: service_healthy
       namenode:
         condition: service_healthy
-    mem_limit: 512m            # FastAPI serving only — no ML for benchmark
-    memswap_limit: 512m
+    mem_limit: 2g              # FastAPI serving + AttentionLSTM training
+    memswap_limit: 2g
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"]
@@ -284,8 +284,8 @@ services:
       - "127.0.0.1:5434:5432"   # Postgres sink — host 5434 (5433 is the MLflow Postgres)
     volumes:
       - postgres_sink_data:/var/lib/postgresql/data
-    mem_limit: 384m
-    memswap_limit: 384m
+    mem_limit: 512m
+    memswap_limit: 512m
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PG_SINK_USER:-grafana} -d ${PG_SINK_DB:-wellness}"]

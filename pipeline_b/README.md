@@ -41,6 +41,13 @@ PARALLELISM=6 make gold
 By default, Compose starts the realtime ingest/processing stack plus MLflow,
 FastAPI, Postgres sink, and Grafana.
 
+The realtime producer reads shared baseline CSVs from:
+
+```text
+../data/hourly_fitbit_sema_df_unprocessed.csv
+../data/daily_fitbit_sema_df_unprocessed.csv
+```
+
 Verify the Flink jobs:
 
 ```bash

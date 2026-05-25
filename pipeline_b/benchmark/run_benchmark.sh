@@ -28,9 +28,9 @@ done
 # ── 2. Verify CSV files exist ────────────────────────────────────────────────
 echo "[check] Verifying CSV data files..."
 for f in hourly_fitbit_sema_df_unprocessed.csv daily_fitbit_sema_df_unprocessed.csv; do
-  if [ ! -f "$f" ]; then
-    echo "[ERROR] Missing: $f"
-    echo "        Run: ln -s ../pipeline_a/$f ./$f"
+  if [ ! -f "../data/$f" ]; then
+    echo "[ERROR] Missing: ../data/$f"
+    echo "        Put the shared CSV files under the repository-level data/ directory."
     exit 1
   fi
   echo "  ✓ $f"
@@ -84,18 +84,15 @@ silver_n=$(count_running_matching silver)
 gold_n=$(count_running_matching gold)
 echo "  running: bronze=$bronze_n silver=$silver_n gold=$gold_n"
 
-# Submit Bronze first. For fairness with Pipeline A, do not pre-seed static
-# CSV data here; the measured workload comes from producer_realtime.py.
+# Submit Bronze first. The measured workload comes from producer_realtime.py.
 if [ "$bronze_n" -eq 0 ]; then
-  echo "  → Bronze not running. Submitting bronze without static pre-seed…"
+  echo "  → Bronze not running. Submitting bronze…"
   make bronze
   echo "  ✓ bronze submitted (detached)"
   sleep 15   # give Bronze a chance to register sources before Silver starts reading
 fi
 
-# Silver must NOT have existing tables from the old batch run — same schema
-# (no PK), Iceberg upsert mode would conflict. Wipe Silver tables if Silver
-# job isn't running, so it can recreate them fresh.
+# If Silver is not already running, clear Silver tables so the benchmark starts`r`n# from the current realtime-only schema.
 if [ "$silver_n" -eq 0 ]; then
   echo "  → Silver not running. Clearing silver.* tables then submitting…"
   make reset-silver || true
@@ -103,9 +100,7 @@ if [ "$silver_n" -eq 0 ]; then
   echo "  ✓ silver submitted (detached)"
 fi
 
-# Gold MUST have its tables dropped if migrating from the old batch Gold:
-# streaming Gold uses PRIMARY KEY + write.upsert.enabled which doesn't match
-# the batch Gold schema. Drop unconditionally if Gold job not running.
+# If Gold is not already running, clear Gold tables so the benchmark starts from`r`n# the current realtime-only schema.
 if [ "$gold_n" -eq 0 ]; then
   echo "  → Gold not running. Clearing gold.* tables then submitting…"
   make reset-gold || true

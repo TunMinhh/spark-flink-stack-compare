@@ -3,8 +3,8 @@
 # =============================================================================
 
 PYTHON          ?= $(shell [ -f .venv/bin/python ] && echo .venv/bin/python || echo python3)
-CSV_HOURLY      := ./hourly_fitbit_sema_df_unprocessed.csv
-CSV_DAILY       := ./daily_fitbit_sema_df_unprocessed.csv
+CSV_HOURLY      := ../data/hourly_fitbit_sema_df_unprocessed.csv
+CSV_DAILY       := ../data/daily_fitbit_sema_df_unprocessed.csv
 KAFKA_BOOTSTRAP := 127.0.0.1:9092
 
 # Docker container IDs (resolved at runtime)
@@ -21,23 +21,23 @@ PKG_DELTA    := io.delta:delta-spark_2.12:3.2.0
 PKG_POSTGRES := org.postgresql:postgresql:42.7.3
 
 # -----------------------------------------------------------------------------
-# Spark memory - profile for one 32-vCPU / 64-GB VM.
+# Spark memory - realistic single-pipeline profile for one 32-vCPU / 64-GB VM.
 # Drivers run in spark-master; executors + overhead run in spark-worker.
 #
-#   Bronze :  4g exec + 1g overhead =  5g in worker
-#   Silver :  8g exec + 2g overhead = 10g in worker
-#   Gold   : 12g exec + 3g overhead = 15g in worker
-#   Total Spark engine budget: ~30g across the three streaming jobs.
+#   Bronze :  2g exec + 1g overhead = 3g in worke
+#   Silver :  4g exec + 2g overhead = 6g in worke
+#   Gold   :  6g exec + 3g overhead = 9g in worke
+#   Total Spark engine budget: ~18g across the three streaming jobs.
 # -----------------------------------------------------------------------------
 DRIVER_MEM := 1g
 
-BRONZE_EXEC     := 4g
+BRONZE_EXEC     := 2g
 BRONZE_OVERHEAD := 1g
 
-SILVER_EXEC     := 8g
+SILVER_EXEC     := 4g
 SILVER_OVERHEAD := 2g
 
-GOLD_EXEC     := 12g
+GOLD_EXEC     := 6g
 GOLD_OVERHEAD := 3g
 
 # Spark Standalone gives an app all available worker cores unless capped.
@@ -88,10 +88,10 @@ SPARK_MAX_RECORDS_PER_FILE ?= 50000
 	producer-realtime \
 	bronze silver gold export-gold \
 	check-kafka check-hdfs check-silver check-gold \
-	check-grafana check-pg-sink \
+	check-grafana check-pg-sink reset-pg-sink \
 	train-ai build-fastapi pyspark \
 	benchmark benchmark-quick smoke-streaming \
-	reset reset-silver
+	reset reset-silve
 
 # =============================================================================
 # INIT
@@ -128,14 +128,9 @@ init-kafka:
 		done'
 
 # =============================================================================
-# PRODUCERS  (run on host, stream CSV data into Kafka)
+# PRODUCER  (run on host, stream realtime intraday data into Kafka)
 # =============================================================================
 
-producer:
-	@echo "[disabled] This project is realtime-only now. Use: make producer-realtime"
-
-producer-daily:
-	@echo "[disabled] This project is realtime-only now. Use: make producer-realtime"
 
 producer-realtime:
 	HOURLY_CSV_PATH=$(CSV_HOURLY) \
@@ -214,12 +209,6 @@ gold:
 		--packages $(PKG_DELTA) \
 		/opt/spark/work-dir/spark_gold_streaming.py'
 
-# Batch maintenance jobs retained for full-table rebuilds and debugging.
-silver-batch:
-	@echo "[disabled] Realtime-only path uses: make silver"
-
-gold-batch:
-	@echo "[disabled] Realtime-only path uses: make gold"
 
 # Phase 4 — Export Gold Delta tables -> PostgreSQL sink for Grafana.
 #           Lightweight (small daily aggregates) — same memory budget as Silver.
@@ -265,6 +254,11 @@ check-pg-sink:
 		-c "\dt" \
 		-c "SELECT 'daily_intraday_summary' AS t, COUNT(*) FROM daily_intraday_summary UNION ALL \
 		    SELECT 'ai_intraday_insights', COUNT(*) FROM ai_intraday_insights;"
+
+reset-pg-sink:
+	docker exec $(C_PGSINK) psql -U $${PG_SINK_USER:-grafana} -d $${PG_SINK_DB:-wellness} \
+		-c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+	@echo "[reset] PostgreSQL sink cleared"
 
 # Trigger AI training via FastAPI (non-blocking — returns job_id immediately)
 train-ai:

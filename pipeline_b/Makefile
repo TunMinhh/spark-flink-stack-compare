@@ -3,9 +3,9 @@
 # =============================================================================
 
 PYTHON          := $(shell [ -f .venv/bin/python ] && echo .venv/bin/python || echo python3)
-# CSV files are shared with pipeline_a — symlinked or copied into this directory
-CSV_HOURLY      := ./hourly_fitbit_sema_df_unprocessed.csv
-CSV_DAILY       := ./daily_fitbit_sema_df_unprocessed.csv
+# CSV files are shared from the repository-level data directory.
+CSV_HOURLY      := ../data/hourly_fitbit_sema_df_unprocessed.csv
+CSV_DAILY       := ../data/daily_fitbit_sema_df_unprocessed.csv
 KAFKA_BOOTSTRAP := 127.0.0.1:9092
 
 # Docker container IDs (resolved at runtime)
@@ -34,10 +34,8 @@ ALL_TOPICS := \
 # Flink parallelism and benchmark scope.
 # Pipeline B benchmarks the realtime intraday path by default:
 # Kafka intraday topics -> Bronze intraday -> Silver intraday -> Gold daily_intraday_summary.
-# To run the full medallion jobs, override these to empty, e.g.:
-#   BRONZE_ONLY= SILVER_ONLY= GOLD_ONLY= make bronze silver gold
-# Single-VM 32-vCPU / 64-GB benchmark profile. Three concurrent Flink jobs
-# use PARALLELISM=6 each, so the TaskManager exposes 18 slots.
+# Realistic single-pipeline 32-vCPU / 64-GB benchmark profile. Three concurrent
+# Flink jobs use PARALLELISM=6 each, so the TaskManager exposes 18 slots.
 # Override PARALLELISM for scale-up experiments.
 PARALLELISM ?= 6
 INTRADAY_TABLES := heart_rate_intraday,hrv_intraday,breathing_intraday
@@ -72,7 +70,7 @@ FLINK_MINI_BATCH_SIZE ?= 5000
 	cancel-bronze cancel-silver cancel-gold cancel-all \
 	list-jobs \
 	check-kafka check-iceberg check-silver check-gold \
-	check-grafana check-pg-sink \
+	check-grafana check-pg-sink reset-pg-sink \
 	train-ai \
 	build-flink \
 	benchmark benchmark-quick \
@@ -110,14 +108,9 @@ init-iceberg:
 	@echo "[init-iceberg] namespaces ready: bronze, silver, gold"
 
 # =============================================================================
-# PRODUCERS  (run on host, stream CSV data into Kafka)
+# PRODUCER  (run on host, stream realtime intraday data into Kafka)
 # =============================================================================
 
-producer:
-	@echo "[disabled] This project is realtime-only now. Use: make producer-realtime"
-
-producer-daily:
-	@echo "[disabled] This project is realtime-only now. Use: make producer-realtime"
 
 producer-realtime:
 	HOURLY_CSV_PATH=$(CSV_HOURLY) \
@@ -164,7 +157,7 @@ bronze: init-kafka init-iceberg
 		-e BRONZE_ONLY=$(BRONZE_ONLY) \
 		$(C_FLINK) /opt/flink/bin/flink run -d -pyexec /usr/bin/python3 -pyclientexec /usr/bin/python3 -py /opt/flink/work-dir/flink_bronze.py
 
-# Silver — TRUE STREAMING: Bronze Iceberg → Silver Iceberg (append-only, 11 sources/sinks)
+# Silver — TRUE STREAMING: Bronze Iceberg → Silver Iceberg (append-only, 3 intraday sources/sinks)
 # Submitted detached. Cancel via `make cancel-silver` or `make cancel-all`.
 silver:
 	docker exec \
@@ -180,9 +173,8 @@ silver:
 		-e SILVER_ONLY=$(SILVER_ONLY) \
 		$(C_FLINK) /opt/flink/bin/flink run -d -pyexec /usr/bin/python3 -pyclientexec /usr/bin/python3 -py /opt/flink/work-dir/flink_silver.py
 
-# Gold — TRUE STREAMING: Silver Iceberg → 7 Gold tables (continuous GROUP BY + Iceberg upsert)
-# Submitted detached. Tables MUST not pre-exist with non-upsert schema; if migrating
-# from the old batch Gold, run `make reset-gold` first.
+# Gold - TRUE STREAMING: Silver Iceberg -> daily_intraday_summary (Iceberg upsert)
+# Submitted detached.
 gold:
 	docker exec \
 		-e ICEBERG_CATALOG_URI=$(ICEBERG_CATALOG_URI) \
@@ -212,7 +204,7 @@ cancel-bronze:
 	@$(MAKE) _cancel-by-name NAME=bronze
 
 cancel-silver:
-	@$(MAKE) _cancel-by-name NAME=silver
+	@$(MAKE) _cancel-by-name NAME=silve
 
 cancel-gold:
 	@$(MAKE) _cancel-by-name NAME=gold
@@ -238,7 +230,6 @@ export-gold:
 		-e AWS_ACCESS_KEY_ID=$(MINIO_USER) \
 		-e AWS_SECRET_ACCESS_KEY=$(MINIO_PASS) \
 		-e AWS_REGION=us-east-1 \
-		-e REALTIME_ONLY_EXPORT=1 \
 		-e PG_SINK_HOST=postgres-sink \
 		-e PG_SINK_PORT=5432 \
 		-e PG_SINK_DB=${PG_SINK_DB} \
@@ -288,11 +279,16 @@ check-pg-sink:
 		-c "SELECT 'daily_intraday_summary' AS t, COUNT(*) FROM daily_intraday_summary UNION ALL \
 		    SELECT 'ai_intraday_insights', COUNT(*) FROM ai_intraday_insights;"
 
+reset-pg-sink:
+	docker exec $(C_PGSINK) psql -U $${PG_SINK_USER:-grafana} -d $${PG_SINK_DB:-wellness} \
+		-c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+	@echo "[reset] PostgreSQL sink cleared"
+
 train-ai:
 	@curl -sf -X POST http://localhost:8000/train | python3 -m json.tool
 
 build-flink:
-	docker compose build flink-jobmanager flink-taskmanager
+	docker compose build flink-jobmanager flink-taskmanage
 
 # =============================================================================
 # RESET
@@ -323,7 +319,6 @@ reset-silver:
 	done
 	@echo "[reset] Silver cleared — run: make silver"
 
-# Required when switching from batch Gold (no PK) to streaming Gold (PK + upsert).
 reset-gold:
 	@tables=$$(curl -sf "http://localhost:8181/v1/namespaces/gold/tables" \
 		| python3 -c "import sys,json; [print(x['name']) for x in json.load(sys.stdin).get('identifiers',[])]" 2>/dev/null); \

@@ -1,9 +1,9 @@
 """
 Export layer: Gold Iceberg → PostgreSQL sink (batch)
 
-Exports the same 8 tables as Spark's spark_gold_to_postgres.py, with matching
-table names. Uses JDBC overwrite (truncate + insert) — Gold is fully
-re-derived each run so there is no state to preserve in the sink.
+Exports the realtime Gold tables used by the producer_realtime pipeline.
+Uses JDBC overwrite; Gold is re-derived each run so there is no state to
+preserve in the sink.
 
 Run via:  make export-gold
 """
@@ -86,133 +86,6 @@ def export_table(gold_table: str, pg_table: str, sink_ddl_cols: str) -> None:
     """).wait()
     print(f"[export] {gold_table} → {pg_table}")
 
-if os.environ.get("REALTIME_ONLY_EXPORT", "1") == "1":
-    export_table("daily_intraday_summary", "daily_intraday_summary", """
-        user_id                STRING,
-        event_date             DATE,
-        intraday_avg_bpm       DOUBLE,
-        intraday_min_bpm       DOUBLE,
-        intraday_max_bpm       DOUBLE,
-        intraday_stddev_bpm    DOUBLE,
-        intraday_hr_readings   BIGINT,
-        intraday_avg_rmssd     DOUBLE,
-        intraday_min_rmssd     DOUBLE,
-        intraday_max_rmssd     DOUBLE,
-        intraday_avg_breathing DOUBLE,
-        intraday_min_breathing DOUBLE,
-        intraday_max_breathing DOUBLE,
-        gold_updated_at        TIMESTAMP(6)
-    """)
-    export_table("ai_intraday_insights", "ai_intraday_insights", """
-        user_id              STRING,
-        event_date           STRING,
-        event_timestamp      TIMESTAMP(6),
-        reconstruction_error FLOAT,
-        z_score              FLOAT,
-        severity             STRING,
-        mlflow_run_id        STRING
-    """)
-    print("[export] Realtime Gold tables exported to postgres-sink.")
-    sys.exit(0)
-
-
-# ---------------------------------------------------------------------------
-# 1. daily_vitals_summary
-# ---------------------------------------------------------------------------
-export_table("daily_vitals_summary", "daily_vitals_summary", """
-    user_id               STRING,
-    event_date            DATE,
-    avg_bpm               DOUBLE,
-    min_bpm               DOUBLE,
-    max_bpm               DOUBLE,
-    stddev_bpm            DOUBLE,
-    avg_temperature       DOUBLE,
-    min_temperature       DOUBLE,
-    max_temperature       DOUBLE,
-    avg_scl               DOUBLE,
-    max_scl               DOUBLE,
-    vitals_hours_recorded BIGINT,
-    gold_updated_at       TIMESTAMP(6)
-""")
-
-# ---------------------------------------------------------------------------
-# 2. daily_activity_summary
-# ---------------------------------------------------------------------------
-export_table("daily_activity_summary", "daily_activity_summary", """
-    user_id                    STRING,
-    event_date                 DATE,
-    total_steps                INT,
-    total_calories             DOUBLE,
-    total_distance_m           DOUBLE,
-    total_minutes_zone_1       INT,
-    total_minutes_zone_2       INT,
-    total_minutes_zone_3       INT,
-    total_minutes_below_zone_1 INT,
-    activity_hours_recorded    BIGINT,
-    total_active_minutes       INT,
-    dominant_activity_type     STRING,
-    goal_met_steps             BOOLEAN,
-    gold_updated_at            TIMESTAMP(6)
-""")
-
-# ---------------------------------------------------------------------------
-# 3. daily_context_summary
-# ---------------------------------------------------------------------------
-export_table("daily_context_summary", "daily_context_summary", """
-    user_id              STRING,
-    event_date           DATE,
-    hours_alert          INT,
-    hours_happy          INT,
-    hours_neutral        INT,
-    hours_rested_relaxed INT,
-    hours_sad            INT,
-    hours_tense_anxious  INT,
-    hours_tired          INT,
-    hours_loc_gym        INT,
-    hours_loc_home       INT,
-    hours_loc_work_school INT,
-    hours_loc_outdoors   INT,
-    hours_loc_transit    INT,
-    dominant_mood        STRING,
-    mindfulness_sessions INT,
-    sema_readings_count  BIGINT,
-    gold_updated_at      TIMESTAMP(6)
-""")
-
-# ---------------------------------------------------------------------------
-# 4. daily_sleep_summary
-# ---------------------------------------------------------------------------
-export_table("daily_sleep_summary", "daily_sleep_summary", """
-    user_id               STRING,
-    event_date            DATE,
-    avg_sleep_duration_ms DOUBLE,
-    avg_sleep_efficiency  DOUBLE,
-    avg_minutes_asleep    DOUBLE,
-    avg_minutes_awake     DOUBLE,
-    avg_sleep_deep_ratio  DOUBLE,
-    avg_sleep_rem_ratio   DOUBLE,
-    avg_sleep_light_ratio DOUBLE,
-    gold_updated_at       TIMESTAMP(6)
-""")
-
-# ---------------------------------------------------------------------------
-# 5. daily_vitals_daily_summary
-# ---------------------------------------------------------------------------
-export_table("daily_vitals_daily_summary", "daily_vitals_daily_summary", """
-    user_id                  STRING,
-    event_date               DATE,
-    avg_spo2                 DOUBLE,
-    avg_stress_score         DOUBLE,
-    avg_resting_hr           DOUBLE,
-    avg_vo2max               DOUBLE,
-    avg_nightly_temperature  DOUBLE,
-    avg_daily_temp_variation DOUBLE,
-    gold_updated_at          TIMESTAMP(6)
-""")
-
-# ---------------------------------------------------------------------------
-# 6. daily_intraday_summary
-# ---------------------------------------------------------------------------
 export_table("daily_intraday_summary", "daily_intraday_summary", """
     user_id                STRING,
     event_date             DATE,
@@ -229,60 +102,13 @@ export_table("daily_intraday_summary", "daily_intraday_summary", """
     intraday_max_breathing DOUBLE,
     gold_updated_at        TIMESTAMP(6)
 """)
-
-# ---------------------------------------------------------------------------
-# 7. daily_wellness_profile
-# ---------------------------------------------------------------------------
-export_table("daily_wellness_profile", "daily_wellness_profile", """
-    user_id                 STRING,
-    event_date              DATE,
-    avg_bpm                 DOUBLE,
-    min_bpm                 DOUBLE,
-    max_bpm                 DOUBLE,
-    avg_temperature         DOUBLE,
-    avg_scl                 DOUBLE,
-    vitals_hours_recorded   BIGINT,
-    total_steps             INT,
-    total_calories          DOUBLE,
-    total_active_minutes    INT,
-    total_minutes_zone_2    INT,
-    total_minutes_zone_3    INT,
-    goal_met_steps          BOOLEAN,
-    activity_hours_recorded BIGINT,
-    dominant_mood           STRING,
-    mindfulness_sessions    INT,
-    hours_tense_anxious     INT,
-    hours_sad               INT,
-    sema_readings_count     BIGINT,
-    avg_sleep_duration_ms   DOUBLE,
-    avg_sleep_efficiency    DOUBLE,
-    avg_sleep_deep_ratio    DOUBLE,
-    avg_sleep_rem_ratio     DOUBLE,
-    intraday_avg_bpm        DOUBLE,
-    intraday_stddev_bpm     DOUBLE,
-    intraday_avg_rmssd      DOUBLE,
-    intraday_avg_breathing  DOUBLE,
-    intraday_hr_readings    BIGINT,
-    avg_spo2                DOUBLE,
-    avg_stress_score        DOUBLE,
-    avg_resting_hr          DOUBLE,
-    avg_vo2max              DOUBLE,
-    age                     STRING,
-    gender                  STRING,
-    bmi                     STRING,
-    gold_updated_at         TIMESTAMP(6)
+export_table("ai_intraday_insights", "ai_intraday_insights", """
+    user_id              STRING,
+    event_date           STRING,
+    event_timestamp      TIMESTAMP(6),
+    reconstruction_error FLOAT,
+    z_score              FLOAT,
+    severity             STRING,
+    mlflow_run_id        STRING
 """)
-
-# ---------------------------------------------------------------------------
-# 8. ai_insights  (written by the FastAPI ML module, not by the pipeline)
-# ---------------------------------------------------------------------------
-export_table("ai_insights", "ai_insights", """
-    user_id               STRING,
-    event_date            DATE,
-    reconstruction_error  DOUBLE,
-    z_score               DOUBLE,
-    severity              STRING,
-    mlflow_run_id         STRING
-""")
-
-print("[export] All Gold tables exported to postgres-sink.")
+print("[export] Realtime Gold tables exported to postgres-sink.")

@@ -402,8 +402,8 @@ def start_producer(users_per_tick: int) -> subprocess.Popen:
     env = os.environ.copy()
     env.update({
         "KAFKA_BOOTSTRAP": KAFKA_BOOTSTRAP,
-        "HOURLY_CSV_PATH": "./hourly_fitbit_sema_df_unprocessed.csv",
-        "DAILY_CSV_PATH":  "./daily_fitbit_sema_df_unprocessed.csv",
+        "HOURLY_CSV_PATH": "../data/hourly_fitbit_sema_df_unprocessed.csv",
+        "DAILY_CSV_PATH":  "../data/daily_fitbit_sema_df_unprocessed.csv",
         "USERS_PER_TICK":  str(users_per_tick),
         "DELAY":           str(DELAY),
         "MAX_TICKS":       str(MAX_TICKS),

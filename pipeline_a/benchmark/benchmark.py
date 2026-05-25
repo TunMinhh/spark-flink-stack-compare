@@ -48,14 +48,6 @@ BRONZE_WATCH_TABLES = [f"{HDFS_BRONZE}/{table}" for table in INTRADAY_TABLES]
 SILVER_WATCH_TABLES = [f"{HDFS_SILVER}/{table}" for table in INTRADAY_TABLES]
 GOLD_WATCH = f"{HDFS_GOLD}/daily_intraday_summary"
 
-# Historical full-pipeline Bronze table names. The benchmark workload is scoped
-# to the three intraday tables below.
-_BRONZE_NON_INTRADAY = (
-    "vitals", "activity", "context", "profile",
-    "sleep", "hrv_summary", "breathing_summary", "vitals_daily",
-)
-BRONZE_BACKGROUND_TABLES = [f"{HDFS_BRONZE}/{t}" for t in _BRONZE_NON_INTRADAY]
-
 _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 RESULTS_FILE = f"benchmark/results_{_ts}.csv"
 STALENESS_FILE = f"benchmark/staleness_{_ts}.csv"
@@ -414,8 +406,8 @@ def start_producer(users_per_tick: int) -> subprocess.Popen:
     env = os.environ.copy()
     env.update({
         "KAFKA_BOOTSTRAP": KAFKA_BOOTSTRAP,
-        "HOURLY_CSV_PATH": "./hourly_fitbit_sema_df_unprocessed.csv",
-        "DAILY_CSV_PATH": "./daily_fitbit_sema_df_unprocessed.csv",
+        "HOURLY_CSV_PATH": "../data/hourly_fitbit_sema_df_unprocessed.csv",
+        "DAILY_CSV_PATH": "../data/daily_fitbit_sema_df_unprocessed.csv",
         "USERS_PER_TICK": str(users_per_tick),
         "DELAY": str(DELAY),
         "MAX_TICKS": str(MAX_TICKS),
@@ -783,16 +775,15 @@ def compact_delta_tables() -> None:
 
     tables = [
         *BRONZE_WATCH_TABLES,
-        *BRONZE_BACKGROUND_TABLES,
         *SILVER_WATCH_TABLES,
         GOLD_WATCH,
     ]
     script = _COMPACT_SCRIPT_TEMPLATE.format(tables=tables)
 
-    n_bronze = len(BRONZE_WATCH_TABLES) + len(BRONZE_BACKGROUND_TABLES)
+    n_bronze = len(BRONZE_WATCH_TABLES)
     print(
         f"  [compact] Running OPTIMIZE on {len(tables)} Delta tables "
-        f"({n_bronze} Bronze = 3 intraday + {len(BRONZE_BACKGROUND_TABLES)} background, "
+        f"({n_bronze} Bronze intraday, "
         f"{len(SILVER_WATCH_TABLES)} Silver intraday, 1 Gold) ..."
     )
     try:

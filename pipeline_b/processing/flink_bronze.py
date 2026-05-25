@@ -1,7 +1,7 @@
 """
 Bronze layer: Kafka → Iceberg (streaming, continuous)
 
-All 11 topics share the same Bronze schema — the Kafka message key carries
+All realtime intraday topics share the same Bronze schema — the Kafka message key carries
 user_id and the value is a JSON envelope identical to what Spark Bronze reads:
 
   { event_date, event_hour, event_timestamp, source_timestamp,

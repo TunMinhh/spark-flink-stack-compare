@@ -23,8 +23,8 @@ Run:
 
 Env vars:
   KAFKA_BOOTSTRAP   default 127.0.0.1:9092
-  HOURLY_CSV_PATH   default ../hourly_fitbit_sema_df_unprocessed.csv
-  DAILY_CSV_PATH    default ../daily_fitbit_sema_df_unprocessed.csv
+  HOURLY_CSV_PATH   default ../data/hourly_fitbit_sema_df_unprocessed.csv
+  DAILY_CSV_PATH    default ../data/daily_fitbit_sema_df_unprocessed.csv
   DELAY             seconds between ticks (default 0.1 → 10 ticks/s)
   USERS_PER_TICK    users emitted per tick (default: all loaded users)
   MAX_TICKS         optional fixed number of ticks to emit, then exit
@@ -44,8 +44,8 @@ from confluent_kafka.admin import AdminClient, NewTopic
 
 # ── Config ────────────────────────────────────────────────────────────────────
 KAFKA_BOOTSTRAP  = os.getenv("KAFKA_BOOTSTRAP",  "127.0.0.1:9092")
-HOURLY_CSV_PATH  = os.getenv("HOURLY_CSV_PATH",  "../hourly_fitbit_sema_df_unprocessed.csv")
-DAILY_CSV_PATH   = os.getenv("DAILY_CSV_PATH",   "../daily_fitbit_sema_df_unprocessed.csv")
+HOURLY_CSV_PATH  = os.getenv("HOURLY_CSV_PATH",  "../data/hourly_fitbit_sema_df_unprocessed.csv")
+DAILY_CSV_PATH   = os.getenv("DAILY_CSV_PATH",   "../data/daily_fitbit_sema_df_unprocessed.csv")
 DELAY            = float(os.getenv("DELAY",       "0.1"))   # seconds between ticks
 USERS_PER_TICK   = os.getenv("USERS_PER_TICK",   None)      # None = all users
 MAX_TICKS        = int(os.getenv("MAX_TICKS", "0") or "0")  # 0 = run forever

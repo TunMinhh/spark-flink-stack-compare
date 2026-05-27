@@ -8,34 +8,34 @@ services:
       - HDFS_CONF_dfs_replication=1
       - HDFS_CONF_dfs_namenode_replication_min=1
       - HDFS_CONF_dfs_namenode_safemode_threshold_pct=0.0
-      - HADOOP_HEAPSIZE=768
+      - HADOOP_HEAPSIZE=1536
     ports:
       - "127.0.0.1:9870:9870"   # HDFS NameNode UI
       - "127.0.0.1:9000:9000"   # HDFS RPC (only needed if connecting from host)
     volumes:
       - namenode_data:/hadoop/dfs/name
-    mem_limit: 1g         # NameNode metadata + RPC headroom for local Delta commits
-    memswap_limit: 1g     # disable swap — OOM is preferable to swap thrash
+    mem_limit: 2g         # NameNode metadata + RPC headroom for local Delta commits
+    memswap_limit: 2g     # disable swap; OOM is preferable to swap thrash
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9870/ || exit 1"]
-      interval: 30s
+      test: ["CMD-SHELL", "hdfs dfsadmin -safemode get 2>/dev/null | grep -q 'Safe mode is OFF'"]
+      interval: 15s
       timeout: 10s
-      retries: 5
+      retries: 10
 
   datanode:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
     environment:
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
       - HDFS_CONF_dfs_replication=1
-      - HADOOP_HEAPSIZE=1536
+      - HADOOP_HEAPSIZE=2048
     volumes:
       - datanode_data:/hadoop/dfs/data
     depends_on:
       namenode:
         condition: service_healthy
-    mem_limit: 2g         # block transfer buffers + JVM GC headroom
-    memswap_limit: 2g
+    mem_limit: 3g         # block transfer buffers + JVM GC headroom
+    memswap_limit: 3g
     restart: unless-stopped
 
   # ===== Kafka (KRaft mode, no ZooKeeper) =====

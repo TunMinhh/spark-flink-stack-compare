@@ -36,9 +36,9 @@ start_stream_if_missing() {
   if ! pgrep -f "$script" > /dev/null 2>&1; then
     echo "  -> $target not running; starting make $target in the background..."
     nohup make "$target" \
-      BRONZE_TRIGGER_SECONDS="${BRONZE_TRIGGER_SECONDS:-30}" \
-      SILVER_TRIGGER_SECONDS="${SILVER_TRIGGER_SECONDS:-30}" \
-      GOLD_TRIGGER_SECONDS="${GOLD_TRIGGER_SECONDS:-30}" \
+      BRONZE_TRIGGER_SECONDS="${BRONZE_TRIGGER_SECONDS:-15}" \
+      SILVER_TRIGGER_SECONDS="${SILVER_TRIGGER_SECONDS:-15}" \
+      GOLD_TRIGGER_SECONDS="${GOLD_TRIGGER_SECONDS:-15}" \
       BRONZE_CORES="${BRONZE_CORES:-6}" \
       SILVER_CORES="${SILVER_CORES:-6}" \
       GOLD_CORES="${GOLD_CORES:-6}" \
@@ -75,7 +75,7 @@ echo "  WARMUP_RUNS       : ${WARMUP_RUNS:-1}"
 echo "  WARMUP_SECS       : ${WARMUP_SECS:-10}"
 echo "  KAFKA_PARTITIONS  : ${KAFKA_PARTITIONS:-12}"
 echo "  SHUFFLE_PARTITIONS: ${SHUFFLE_PARTITIONS:-18}"
-echo "  TRIGGER_SECONDS   : bronze=${BRONZE_TRIGGER_SECONDS:-30} silver=${SILVER_TRIGGER_SECONDS:-30} gold=${GOLD_TRIGGER_SECONDS:-30}"
+echo "  TRIGGER_SECONDS   : bronze=${BRONZE_TRIGGER_SECONDS:-15} silver=${SILVER_TRIGGER_SECONDS:-15} gold=${GOLD_TRIGGER_SECONDS:-15}"
 echo ""
 
 LOG="benchmark/benchmark_$(date +%Y%m%d_%H%M%S).log"

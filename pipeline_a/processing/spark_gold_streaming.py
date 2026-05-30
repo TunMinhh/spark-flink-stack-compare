@@ -1,17 +1,28 @@
 """
 GOLD LAYER - Spark Structured Streaming: Silver Delta -> Gold Delta.
 
-This job watches the three intraday Silver Delta tables and incrementally
-refreshes daily_intraday_summary. Each micro-batch identifies the affected
-(user_id, event_date) keys, recomputes only those keys from Silver, and upserts
-them into the Gold Delta table.
+This job maintains daily_intraday_summary as a STATEFUL, incremental streaming
+aggregation. Spark Structured Streaming keeps a running aggregate per
+(user_id, event_date) in its state store; each micro-batch processes only the
+new Silver rows that arrived since the last trigger, updates the in-state
+aggregate, and upserts the changed keys into the Gold Delta table.
 
-Note: _refresh_lock was removed. Spark Structured Streaming with foreachBatch
-guarantees sequential micro-batch execution — batch N+1 never starts until
-batch N's foreachBatch call returns. A non-blocking lock therefore has no
-protective effect and causes Silver micro-batches to be permanently skipped
-(Spark advances the checkpoint even when foreachBatch returns early), resulting
-in an incomplete Gold table.
+WHY THIS DESIGN (fairness note):
+  The previous version was a *stateless full re-aggregation*: every micro-batch
+  re-read the entire Silver table for the touched keys (a broadcast join over
+  the full Delta table) and recomputed each aggregate from scratch. That made
+  Gold cost grow with the accumulated Silver size and made the Spark/Delta
+  pipeline far slower than necessary. Flink's Gold job (pipeline_b/processing/
+  flink_gold.py) uses a continuous, stateful GROUP BY maintained in managed
+  state. To compare the two stacks on an equal algorithmic footing, this Spark
+  Gold now mirrors that approach: a streaming GROUP BY over a UNION of the three
+  intraday Silver streams, in update output mode, with an idempotent Delta MERGE
+  upsert per trigger. Like flink_gold.py it uses NO watermark, so state is kept
+  for all keys (the (user_id, event_date) key set is bounded for this workload).
+
+Note: foreachBatch guarantees sequential micro-batch execution -- batch N+1
+never starts until batch N's callback returns -- so the MERGE upsert is safe
+without an external lock.
 """
 
 from __future__ import annotations
@@ -21,7 +32,7 @@ import time
 
 from delta.tables import DeltaTable
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.functions import avg, broadcast, col, count, current_timestamp, lit, max as spark_max, min as spark_min, stddev
+from pyspark.sql.functions import avg, col, count, current_timestamp, lit, max as spark_max, min as spark_min, stddev
 from pyspark.sql.types import DateType, DoubleType, LongType, StringType, StructField, StructType, TimestampType
 
 
@@ -81,10 +92,6 @@ def wait_for_delta_table(path: str, label: str) -> None:
     raise TimeoutError(f"Silver Delta table not found for {label}: {path}")
 
 
-def read_silver(topic: str) -> DataFrame:
-    return spark.read.format("delta").load(f"{HDFS_SILVER_BASE}/{topic}")
-
-
 def ensure_gold_table() -> None:
     if DeltaTable.isDeltaTable(spark, GOLD_TABLE):
         return
@@ -98,88 +105,86 @@ def ensure_gold_table() -> None:
     )
 
 
-def read_silver_for_keys(topic: str, keys: DataFrame) -> DataFrame:
-    return read_silver(topic).join(broadcast(keys), on=USER_DAY_KEYS, how="inner")
+def _silver_readstream(topic: str) -> DataFrame:
+    """Incremental streaming read of one Silver Delta table.
+
+    Spark processes the existing snapshot as the first micro-batch and then
+    streams only newly committed files on each subsequent trigger -- it never
+    re-reads the whole table. This is the incremental ingest that replaces the
+    old full-table re-scan.
+    """
+    path = f"{HDFS_SILVER_BASE}/{topic}"
+    wait_for_delta_table(path, topic)
+    return spark.readStream.format("delta").load(path)
 
 
-def build_trigger_stream() -> DataFrame:
-    streams = []
-    for topic in TABLES:
-        path = f"{HDFS_SILVER_BASE}/{topic}"
-        wait_for_delta_table(path, topic)
-        stream = (
-            spark.readStream.format("delta")
-            .load(path)
-            .select("user_id", "event_date", "event_timestamp")
-            .withColumn("source_table", lit(topic))
-        )
-        streams.append(stream)
+def build_gold_stream() -> DataFrame:
+    """Union the three intraday Silver streams and aggregate per (user, day).
 
-    trigger = streams[0]
-    for stream in streams[1:]:
-        trigger = trigger.unionByName(stream)
-    return trigger
+    Each source contributes one signal column; the other two are NULL, so the
+    AVG/MIN/MAX/COUNT/STDDEV aggregates (which ignore NULLs) compute exactly the
+    same daily summary as before -- but now incrementally and statefully.
+    """
+    hr = _silver_readstream("heart_rate_intraday").select(
+        col("user_id"),
+        col("event_date"),
+        col("bpm").cast(DoubleType()).alias("bpm"),
+        lit(None).cast(DoubleType()).alias("rmssd"),
+        lit(None).cast(DoubleType()).alias("breaths_per_minute"),
+    )
+    hrv = _silver_readstream("hrv_intraday").select(
+        col("user_id"),
+        col("event_date"),
+        lit(None).cast(DoubleType()).alias("bpm"),
+        col("rmssd").cast(DoubleType()).alias("rmssd"),
+        lit(None).cast(DoubleType()).alias("breaths_per_minute"),
+    )
+    br = _silver_readstream("breathing_intraday").select(
+        col("user_id"),
+        col("event_date"),
+        lit(None).cast(DoubleType()).alias("bpm"),
+        lit(None).cast(DoubleType()).alias("rmssd"),
+        col("breaths_per_minute").cast(DoubleType()).alias("breaths_per_minute"),
+    )
+
+    combined = (
+        hr.unionByName(hrv)
+        .unionByName(br)
+        .filter(col("user_id").isNotNull() & col("event_date").isNotNull())
+    )
+
+    # Stateful streaming aggregation. Spark keeps the running aggregate for each
+    # (user_id, event_date) in its state store and updates it from new rows
+    # only. No watermark -> unbounded state, matching flink_gold.py.
+    return combined.groupBy("user_id", "event_date").agg(
+        avg("bpm").cast(DoubleType()).alias("intraday_avg_bpm"),
+        spark_min("bpm").cast(DoubleType()).alias("intraday_min_bpm"),
+        spark_max("bpm").cast(DoubleType()).alias("intraday_max_bpm"),
+        stddev("bpm").cast(DoubleType()).alias("intraday_stddev_bpm"),
+        count("bpm").cast(LongType()).alias("intraday_hr_readings"),
+        avg("rmssd").cast(DoubleType()).alias("intraday_avg_rmssd"),
+        spark_min("rmssd").cast(DoubleType()).alias("intraday_min_rmssd"),
+        spark_max("rmssd").cast(DoubleType()).alias("intraday_max_rmssd"),
+        avg("breaths_per_minute").cast(DoubleType()).alias("intraday_avg_breathing"),
+        spark_min("breaths_per_minute").cast(DoubleType()).alias("intraday_min_breathing"),
+        spark_max("breaths_per_minute").cast(DoubleType()).alias("intraday_max_breathing"),
+    )
 
 
-def refresh_gold(batch_df: DataFrame, batch_id: int) -> None:
-    if batch_df.rdd.isEmpty():
-        return
+def upsert_gold(batch_df: DataFrame, batch_id: int) -> None:
+    """Upsert the keys that changed in this micro-batch into the Gold table.
 
+    In update output mode, batch_df already holds the CURRENT aggregate for each
+    key whose value changed this trigger (computed from state, not from a Silver
+    re-scan), so we only MERGE those rows.
+    """
+    batch_df = batch_df.persist()
     try:
-
-        keys = (
-            batch_df.select(*USER_DAY_KEYS)
-            .dropna(subset=USER_DAY_KEYS)
-            .distinct()
-            .cache()
-        )
-        key_count = keys.count()
-        if key_count == 0:
+        changed = batch_df.count()
+        if changed == 0:
             return
 
-        hr = read_silver_for_keys("heart_rate_intraday", keys)
-        hrv = read_silver_for_keys("hrv_intraday", keys)
-        br = read_silver_for_keys("breathing_intraday", keys)
-
-        hr_daily = hr.groupBy(*USER_DAY_KEYS).agg(
-            avg("bpm").alias("intraday_avg_bpm"),
-            spark_min("bpm").alias("intraday_min_bpm"),
-            spark_max("bpm").alias("intraday_max_bpm"),
-            stddev("bpm").alias("intraday_stddev_bpm"),
-            count("bpm").alias("intraday_hr_readings"),
-        )
-        hrv_daily = hrv.groupBy(*USER_DAY_KEYS).agg(
-            avg("rmssd").alias("intraday_avg_rmssd"),
-            spark_min("rmssd").alias("intraday_min_rmssd"),
-            spark_max("rmssd").alias("intraday_max_rmssd"),
-        )
-        br_daily = br.groupBy(*USER_DAY_KEYS).agg(
-            avg("breaths_per_minute").alias("intraday_avg_breathing"),
-            spark_min("breaths_per_minute").alias("intraday_min_breathing"),
-            spark_max("breaths_per_minute").alias("intraday_max_breathing"),
-        )
-
-        gold = (
-            keys.join(hr_daily, on=USER_DAY_KEYS, how="left")
-            .join(hrv_daily, on=USER_DAY_KEYS, how="left")
-            .join(br_daily, on=USER_DAY_KEYS, how="left")
-            .select(
-                col("user_id"),
-                col("event_date"),
-                col("intraday_avg_bpm").cast(DoubleType()).alias("intraday_avg_bpm"),
-                col("intraday_min_bpm").cast(DoubleType()).alias("intraday_min_bpm"),
-                col("intraday_max_bpm").cast(DoubleType()).alias("intraday_max_bpm"),
-                col("intraday_stddev_bpm").cast(DoubleType()).alias("intraday_stddev_bpm"),
-                col("intraday_hr_readings").cast(LongType()).alias("intraday_hr_readings"),
-                col("intraday_avg_rmssd").cast(DoubleType()).alias("intraday_avg_rmssd"),
-                col("intraday_min_rmssd").cast(DoubleType()).alias("intraday_min_rmssd"),
-                col("intraday_max_rmssd").cast(DoubleType()).alias("intraday_max_rmssd"),
-                col("intraday_avg_breathing").cast(DoubleType()).alias("intraday_avg_breathing"),
-                col("intraday_min_breathing").cast(DoubleType()).alias("intraday_min_breathing"),
-                col("intraday_max_breathing").cast(DoubleType()).alias("intraday_max_breathing"),
-            )
-            .withColumn("gold_updated_at", current_timestamp())
-        )
+        gold = batch_df.withColumn("gold_updated_at", current_timestamp())
 
         ensure_gold_table()
         for attempt in range(1, GOLD_MERGE_RETRIES + 1):
@@ -210,21 +215,23 @@ def refresh_gold(batch_df: DataFrame, batch_id: int) -> None:
                     f"retrying {attempt}/{GOLD_MERGE_RETRIES} in {GOLD_MERGE_RETRY_SLEEP_SECONDS}s."
                 )
                 time.sleep(GOLD_MERGE_RETRY_SLEEP_SECONDS)
-        print(f"[gold-stream] Upserted {key_count} daily_intraday_summary key(s) from batch {batch_id}")
+        print(f"[gold-stream] Upserted {changed} changed key(s) from batch {batch_id}")
     finally:
         try:
-            keys.unpersist()
+            batch_df.unpersist()
         except Exception:
             pass
 
 
 if __name__ == "__main__":
-    trigger = build_trigger_stream()
+    gold_stream = build_gold_stream()
     query = (
-        trigger.writeStream.foreachBatch(refresh_gold)
+        gold_stream.writeStream
+        .outputMode("update")
+        .foreachBatch(upsert_gold)
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/daily_intraday_summary")
         .trigger(processingTime=f"{TRIGGER_SECONDS} seconds")
         .start()
     )
-    print("[gold-stream] Structured Streaming started. Waiting for data ...")
+    print("[gold-stream] Stateful streaming aggregation started. Waiting for data ...")
     query.awaitTermination()

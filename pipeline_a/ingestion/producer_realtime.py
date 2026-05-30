@@ -156,7 +156,7 @@ def _noisy(base: float, std: float, lo: float, hi: float) -> float:
 def build_intraday_events(entry: dict, ts: str, trace_id: str, source_timestamp: str) -> dict[str, dict]:
     base = {
         "user_id":         entry["user_id"],
-        "event_date":      entry["event_date"],
+        "event_date":      ts[:10],  # real-time ingestion date (intraday stream), not the historical replay date
         "event_hour":      entry["event_hour"],
         "event_timestamp": ts,
         "source_timestamp": source_timestamp,

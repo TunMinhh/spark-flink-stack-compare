@@ -33,7 +33,7 @@ STABLE_POLLS_REQUIRED = int(os.getenv("STABLE_POLLS_REQUIRED", "3"))
 STABLE_MAX_WAIT = int(os.getenv("STABLE_MAX_WAIT", "800"))
 # Gold trigger interval (seconds). Used to size the post-Silver settle window so
 # Gold has time to process Silver's final micro-batch before we record t_gold.
-GOLD_TRIGGER_SECONDS = int(os.getenv("GOLD_TRIGGER_SECONDS", "30"))
+GOLD_TRIGGER_SECONDS = int(os.getenv("GOLD_TRIGGER_SECONDS", "15"))
 
 REQUEST_RATES = [int(x.strip()) for x in os.getenv("REQUEST_RATES", "50,100,200").split(",")]
 MAX_TICKS = int(os.getenv("MAX_TICKS", str(max(1, round(WARMUP_SECS / DELAY)))))

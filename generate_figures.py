@@ -13,6 +13,7 @@ from pathlib import Path
 BASE   = Path(__file__).parent / "benchmark_result"
 OUTDIR = Path("/mnt/c/Users/tranm/Downloads")
 
+# New Spark results use corrected O(1-2 file) measurement methodology
 SPARK_FILES = {
     1500: BASE / "spark_result/50_result.csv",
     3000: BASE / "spark_result/100_result.csv",
@@ -78,13 +79,13 @@ import numpy as np
 
 plt.rcParams.update({
     "font.family":      "serif",
-    "font.size":        11,
-    "axes.titlesize":   12,
-    "axes.labelsize":   11,
-    "xtick.labelsize":  10,
-    "ytick.labelsize":  10,
-    "legend.fontsize":  10,
-    "figure.dpi":       150,
+    "font.size":        13,
+    "axes.titlesize":   14,
+    "axes.labelsize":   13,
+    "xtick.labelsize":  12,
+    "ytick.labelsize":  12,
+    "legend.fontsize":  12,
+    "figure.dpi":       200,
 })
 
 COL_FLINK = "#2166ac"   # blue
@@ -97,7 +98,7 @@ RATE_LABELS = ["1,500", "3,000", "6,000"]
 # ══════════════════════════════════════════════════════════════════════════════
 # FIGURE 1 — E2E latency  +  Avg Gold staleness
 # ══════════════════════════════════════════════════════════════════════════════
-fig1, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+fig1, axes = plt.subplots(1, 2, figsize=(14, 5.5))
 fig1.subplots_adjust(wspace=0.35)
 
 for ax, met_key, title, ylabel in [
@@ -188,7 +189,7 @@ LAYERS     = ["Bronze", "Silver", "Gold"]
 LAG_KEYS   = ["bronze_lag", "silver_lag", "gold_lag"]
 
 # Layout: 3 rate columns, each column shows Bronze/Silver/Gold bars (Flink vs Spark)
-fig2, axes2 = plt.subplots(1, 3, figsize=(13, 4.8), sharey=False)
+fig2, axes2 = plt.subplots(1, 3, figsize=(16, 5.5), sharey=False)
 fig2.subplots_adjust(wspace=0.28)
 
 LAYER_COLORS_F = ["#4393c3", "#2166ac", "#053061"]   # blue shades (Bronze→Silver→Gold)
@@ -223,7 +224,7 @@ for col_idx, rate in enumerate(RATES):
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + max(spark_vals) * 0.02,
-                f"{ratio:.0f}×",
+                f"{ratio:.1f}×",
                 ha="center", va="bottom", fontsize=8.5, style="italic",
             )
         # Flink value labels

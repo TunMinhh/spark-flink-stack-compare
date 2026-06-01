@@ -1,6 +1,6 @@
 # Pipeline B Benchmark Guide
 
-Pipeline B benchmarks the realtime intraday Flink/Iceberg path:
+Pipeline B benchmarks the realtime intraday Flink/Iceberg/HDFS path:
 
 ```text
 producer_realtime
@@ -8,11 +8,14 @@ producer_realtime
 -> Flink Bronze Iceberg intraday tables
 -> Flink Silver Iceberg intraday tables
 -> Flink Gold daily_intraday_summary
+-> Iceberg warehouse on hdfs://namenode:9000/warehouse/iceberg
 ```
 
 The benchmark runs only the realtime producer and does not run AI training.
 The hourly/daily CSV files are used only as baseline inputs for
 `producer_realtime.py`; they are not emitted as hourly or daily Kafka topics.
+MinIO remains available for MLflow artifacts, but it is not used for the
+Iceberg warehouse in this benchmark.
 
 ## Run
 

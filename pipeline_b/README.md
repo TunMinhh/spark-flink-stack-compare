@@ -1,6 +1,8 @@
 # Pipeline B Benchmark Plan
 
-Pipeline B is benchmarked in intraday-only mode by default. This measures the realtime path:
+Pipeline B is benchmarked in intraday-only mode by default. It now uses the
+same single-node HDFS service profile as Pipeline A for the Iceberg warehouse
+and Flink checkpoints:
 
 ```text
 producer_realtime
@@ -8,6 +10,7 @@ producer_realtime
 -> Bronze heart_rate_intraday / hrv_intraday / breathing_intraday
 -> Silver heart_rate_intraday / hrv_intraday / breathing_intraday
 -> Gold daily_intraday_summary
+-> Iceberg warehouse on hdfs://namenode:9000/warehouse/iceberg
 ```
 
 The Makefile defaults are already set for this path:
@@ -40,6 +43,9 @@ PARALLELISM=6 make gold
 
 By default, Compose starts the realtime ingest/processing stack plus MLflow,
 FastAPI, Postgres sink, and Grafana.
+
+MinIO remains in the Compose stack only for MLflow artifacts; it is no longer
+the Iceberg warehouse used by the benchmark path.
 
 The realtime producer reads shared baseline CSVs from:
 
@@ -92,32 +98,32 @@ Run three request-rate levels, with one warmup run and three measured runs per l
 
 ```bash
 PYTHONUNBUFFERED=1 \
-REQUEST_RATES=5,10,15,20 \
+REQUEST_RATES=50,100,200 \
 N_RUNS=3 \
 WARMUP_RUNS=1 \
-WARMUP_SECS=30 \
-STABLE_MAX_WAIT=300 \
+WARMUP_SECS=10 \
+STABLE_MAX_WAIT=800 \
 PARALLELISM=6 \
 bash benchmark/run_benchmark.sh
 ```
 
 Request-rate mapping with default `DELAY=0.1`:
 
-| USERS_PER_TICK | Approx req/s |
+| USERS_PER_TICK | Approx events/s |
 |----------------|--------------|
 | 50 | 1,500 |
-| 500 | 15,000 |
-| 1500 | 45,000 |
+| 100 | 3,000 |
+| 200 | 6,000 |
 
 If time is limited, run one measured run per level first:
 
 ```bash
 PYTHONUNBUFFERED=1 \
-REQUEST_RATES=5,10,15,20 \
+REQUEST_RATES=50,100,200 \
 N_RUNS=1 \
 WARMUP_RUNS=1 \
-WARMUP_SECS=30 \
-STABLE_MAX_WAIT=300 \
+WARMUP_SECS=10 \
+STABLE_MAX_WAIT=800 \
 PARALLELISM=6 \
 bash benchmark/run_benchmark.sh
 ```

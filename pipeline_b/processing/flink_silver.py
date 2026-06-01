@@ -21,9 +21,7 @@ import os
 from pyflink.table import EnvironmentSettings, TableEnvironment
 
 ICEBERG_URI = os.environ["ICEBERG_CATALOG_URI"]
-S3_ENDPOINT = os.environ["S3_ENDPOINT"]
-AWS_KEY     = os.environ["AWS_ACCESS_KEY_ID"]
-AWS_SECRET  = os.environ["AWS_SECRET_ACCESS_KEY"]
+ICEBERG_WAREHOUSE = os.environ.get("ICEBERG_WAREHOUSE", "hdfs://namenode:9000/warehouse/iceberg")
 PARALLELISM = int(os.environ.get("PARALLELISM", "6"))
 
 # Iceberg streaming source poll interval — lower = lower latency, more S3 LIST calls.
@@ -56,16 +54,14 @@ cfg.set_string("execution.checkpointing.mode",            "EXACTLY_ONCE")
 cfg.set_string("execution.checkpointing.timeout",         "10 min")
 cfg.set_string("execution.checkpointing.min-pause",       "5 s")
 cfg.set_string("execution.checkpointing.max-concurrent-checkpoints", "1")
-cfg.set_string("state.checkpoints.dir",                   "s3://mlflow/flink-checkpoints/silver")
+cfg.set_string("state.checkpoints.dir",                   os.environ.get("FLINK_CHECKPOINT_DIR_SILVER", "hdfs://namenode:9000/checkpoints/flink/silver"))
 cfg.set_string("restart-strategy.type",                   "fixed-delay")
 cfg.set_string("restart-strategy.fixed-delay.attempts",   "3")
 cfg.set_string("restart-strategy.fixed-delay.delay",      "10 s")
 
 # ── S3 / MinIO ────────────────────────────────────────────────────────────────
-cfg.set_string("s3.endpoint",          S3_ENDPOINT)
-cfg.set_string("s3.path-style-access", "true")
-cfg.set_string("s3.access-key",        AWS_KEY)
-cfg.set_string("s3.secret-key",        AWS_SECRET)
+cfg.set_string("fs.default-scheme", "hdfs://namenode:9000")
+cfg.set_string("fs.hdfs.hadoopconf", "/opt/hadoop/etc/hadoop")
 
 # ── Iceberg catalog ───────────────────────────────────────────────────────────
 if "iceberg_cat" not in t_env.list_catalogs():
@@ -74,10 +70,8 @@ if "iceberg_cat" not in t_env.list_catalogs():
             'type'                 = 'iceberg',
             'catalog-type'         = 'rest',
             'uri'                  = '{ICEBERG_URI}',
-            'io-impl'              = 'org.apache.iceberg.aws.s3.S3FileIO',
-            's3.endpoint'          = '{S3_ENDPOINT}',
-            's3.path-style-access' = 'true',
-            'warehouse'            = 's3://iceberg/'
+            'io-impl'              = 'org.apache.iceberg.hadoop.HadoopFileIO',
+            'warehouse'            = '{ICEBERG_WAREHOUSE}'
         )
     """)
 t_env.execute_sql("CREATE DATABASE IF NOT EXISTS iceberg_cat.silver")

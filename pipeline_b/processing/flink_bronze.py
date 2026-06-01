@@ -20,12 +20,10 @@ from pyflink.table import StreamTableEnvironment, EnvironmentSettings
 
 KAFKA_BOOTSTRAP  = os.environ["KAFKA_BOOTSTRAP"]
 ICEBERG_URI      = os.environ["ICEBERG_CATALOG_URI"]
-S3_ENDPOINT      = os.environ["S3_ENDPOINT"]
-AWS_KEY          = os.environ["AWS_ACCESS_KEY_ID"]
-AWS_SECRET       = os.environ["AWS_SECRET_ACCESS_KEY"]
+ICEBERG_WAREHOUSE = os.environ.get("ICEBERG_WAREHOUSE", "hdfs://namenode:9000/warehouse/iceberg")
 PARALLELISM      = int(os.environ.get("PARALLELISM", "6"))
 CHECKPOINT_INTERVAL_MS = int(float(os.environ.get("FLINK_CHECKPOINT_INTERVAL_SECONDS", "15")) * 1000)
-CHECKPOINT_DIR   = "s3://mlflow/flink-checkpoints/bronze"
+CHECKPOINT_DIR   = os.environ.get("FLINK_CHECKPOINT_DIR_BRONZE", "hdfs://namenode:9000/checkpoints/flink/bronze")
 BRONZE_ONLY = {
     name.strip()
     for name in os.environ.get("BRONZE_ONLY", "").split(",")
@@ -41,10 +39,8 @@ settings = EnvironmentSettings.new_instance().in_streaming_mode().build()
 t_env = StreamTableEnvironment.create(env, settings)
 
 cfg = t_env.get_config().get_configuration()
-cfg.set_string("s3.endpoint", S3_ENDPOINT)
-cfg.set_string("s3.path-style-access", "true")
-cfg.set_string("s3.access-key", AWS_KEY)
-cfg.set_string("s3.secret-key", AWS_SECRET)
+cfg.set_string("fs.default-scheme", "hdfs://namenode:9000")
+cfg.set_string("fs.hdfs.hadoopconf", "/opt/hadoop/etc/hadoop")
 
 if "iceberg_cat" not in t_env.list_catalogs():
     t_env.execute_sql(f"""
@@ -52,10 +48,8 @@ if "iceberg_cat" not in t_env.list_catalogs():
             'type'                 = 'iceberg',
             'catalog-type'         = 'rest',
             'uri'                  = '{ICEBERG_URI}',
-            'io-impl'              = 'org.apache.iceberg.aws.s3.S3FileIO',
-            's3.endpoint'          = '{S3_ENDPOINT}',
-            's3.path-style-access' = 'true',
-            'warehouse'            = 's3://iceberg/'
+            'io-impl'              = 'org.apache.iceberg.hadoop.HadoopFileIO',
+            'warehouse'            = '{ICEBERG_WAREHOUSE}'
         )
     """)
 t_env.execute_sql("CREATE DATABASE IF NOT EXISTS iceberg_cat.bronze")

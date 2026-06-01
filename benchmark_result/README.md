@@ -28,7 +28,7 @@ Pipeline A uses Spark Structured Streaming + Delta Lake + HDFS. Pipeline B uses 
 | Stable wait timeout | `800s` | `800s` |
 | Kafka partitions | `12` | `12` |
 | Main compute knob | `SHUFFLE_PARTITIONS=18` | `PARALLELISM=6` |
-| Trigger/checkpoint | Spark triggers `30s` | Flink checkpoints `15s` |
+| Trigger/checkpoint | Spark triggers `15s` | Flink checkpoints `15s` |
 | Gold target | `daily_intraday_summary` | `daily_intraday_summary` |
 
 Each request-rate tier starts from a clean pipeline state. Inside that tier, the warmup run and the three measured runs execute continuously without resetting state. This keeps rate `100` from inheriting table history from rate `50`, while still measuring steady behavior across repeated runs at the same rate.

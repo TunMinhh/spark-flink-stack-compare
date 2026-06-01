@@ -142,37 +142,35 @@ def latest_delta_ts_ms_many(table_paths: list[str]) -> dict[str, int]:
     return {p: latest_delta_ts_ms(p) for p in table_paths}
 
 
-# Cache: table_path -> (latest_commit_ts_ms, row_count)
-_delta_count_cache: dict[str, tuple[int, int]] = {}
+# Cache: table_path -> (last_scanned_log_idx, {parquet_path: row_count})
+# Incremental: each call only reads log files with index > last_scanned_log_idx,
+# reducing per-call cost from O(all log files) to O(new log files since last call).
+_delta_file_map: dict[str, tuple[int, dict[str, int]]] = {}
+
+
+def _log_file_idx(log_path: str) -> int:
+    name = log_path.rsplit("/", 1)[-1]
+    try:
+        return int(name.replace(".json", ""))
+    except ValueError:
+        return -1
 
 
 def delta_row_count(table_path: str) -> int:
-    """Read row count from Delta log.  O(n log files) — call sparingly."""
+    """Net row count from Delta log. O(new log files since last call)."""
     logs = delta_json_logs(table_path)
     if not logs:
         return 0
-
-    all_actions: dict[str, list[dict]] = {log: _read_json_lines(log) for log in logs}
-
-    latest_ts = 0
-    for log in reversed(logs):
-        best = 0
-        for action in all_actions[log]:
-            if "commitInfo" in action:
-                best = max(best, int(action["commitInfo"].get("timestamp", 0) or 0))
-            if "add" in action:
-                best = max(best, int(action["add"].get("modificationTime", 0) or 0))
-        if best > 0:
-            latest_ts = best
-            break
-
-    cached = _delta_count_cache.get(table_path)
-    if cached and cached[0] == latest_ts and latest_ts > 0:
-        return cached[1]
-
-    active: dict[str, int] = {}
-    for log in logs:
-        for action in all_actions[log]:
+    cached = _delta_file_map.get(table_path)
+    if cached:
+        last_idx, file_map = cached
+        new_logs = [l for l in logs if _log_file_idx(l) > last_idx]
+        file_map = dict(file_map)
+    else:
+        new_logs = logs
+        file_map = {}
+    for log in new_logs:
+        for action in _read_json_lines(log):
             if "add" in action:
                 add = action["add"]
                 stats = add.get("stats", "{}")
@@ -180,12 +178,11 @@ def delta_row_count(table_path: str) -> int:
                     stats_obj = json.loads(stats) if isinstance(stats, str) else (stats or {})
                 except json.JSONDecodeError:
                     stats_obj = {}
-                active[add["path"]] = int((stats_obj or {}).get("numRecords", 0) or 0)
+                file_map[add["path"]] = int((stats_obj or {}).get("numRecords", 0) or 0)
             elif "remove" in action:
-                active.pop(action["remove"].get("path"), None)
-    count = sum(active.values())
-    _delta_count_cache[table_path] = (latest_ts, count)
-    return count
+                file_map.pop(action["remove"].get("path"), None)
+    _delta_file_map[table_path] = (_log_file_idx(logs[-1]), file_map)
+    return sum(file_map.values())
 
 
 def delta_row_count_many(table_paths: list[str]) -> int:
@@ -286,6 +283,11 @@ class StalenessMonitor:
         if self._thread:
             self._thread.join(timeout=10)
 
+    def set_measure_from(self, wall_s: float) -> None:
+        """Trim stats to samples at or after wall_s (e.g. first Gold commit).
+        All samples are still written to the CSV; only avg/max/min are trimmed."""
+        self._measure_from: float = wall_s
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             ts_ms = latest_delta_ts_ms(self.table_path)
@@ -298,7 +300,9 @@ class StalenessMonitor:
             self._stop.wait(STALENESS_POLL_SECS)
 
     def _vals(self) -> list[float]:
-        return [s["staleness_s"] for s in self.samples]
+        mf = getattr(self, "_measure_from", None)
+        src = self.samples if mf is None else [s for s in self.samples if s["wall_s"] >= mf]
+        return [s["staleness_s"] for s in src]
 
     @property
     def avg_s(self) -> float:
@@ -483,6 +487,7 @@ def run_once(
                     last_ts     = ts
                     if not first_gold_wall:
                         first_gold_wall.append(wall_offset)
+                        staleness_mon.set_measure_from(wall_offset)
                     gold_last_commit_wall.clear()
                     gold_last_commit_wall.append(wall_offset)
                 gold_tracker_stop.wait(STABLE_POLL_SECS)
@@ -577,7 +582,7 @@ def run_once(
     catchup_ratio           = round(pipeline_lag / WARMUP_SECS, 2) if WARMUP_SECS > 0 and pipeline_lag >= 0 else -1.0
     silver_to_bronze_ratio  = round(rows_s / rows_b, 4) if rows_b > 0 else -1.0
 
-    print(f"\n  Staleness avg={staleness_mon.avg_s}s max={staleness_mon.max_s}s min={staleness_mon.min_s}s")
+    print(f"\n  Staleness (post-first-Gold) avg={staleness_mon.avg_s}s max={staleness_mon.max_s}s min={staleness_mon.min_s}s  [samples={len(staleness_mon.samples)} total, {len(staleness_mon._vals())} post-first-gold]")
     print(f"  First Gold commit: {first_gold_latency}s")
     print(f"  Catch-up lag: Bronze={bronze_lag}s Silver={silver_lag}s Gold={gold_lag}s")
     print(f"  Throughput rows/s: Bronze={bronze_tps} Silver={silver_tps}")

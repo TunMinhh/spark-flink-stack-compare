@@ -274,6 +274,11 @@ class StalenessMonitor:
         if self._thread:
             self._thread.join(timeout=10)
 
+    def set_measure_from(self, wall_s: float) -> None:
+        """Trim stats to samples at or after wall_s (e.g. first Gold commit).
+        All samples are still written to the CSV; only avg/max/min are trimmed."""
+        self._measure_from: float = wall_s
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             ts_ms = latest_snapshot_ts(self.ns, self.table)
@@ -287,7 +292,9 @@ class StalenessMonitor:
 
     # Convenience stats
     def _vals(self) -> list[float]:
-        return [s["staleness_s"] for s in self.samples]
+        mf = getattr(self, "_measure_from", None)
+        src = self.samples if mf is None else [s for s in self.samples if s["wall_s"] >= mf]
+        return [s["staleness_s"] for s in src]
 
     @property
     def avg_s(self) -> float:
@@ -497,6 +504,7 @@ def run_once(
                     last_ts = ts
                     if not _first_gold_wall:
                         _first_gold_wall.append(wall_offset)
+                        staleness_mon.set_measure_from(wall_offset)
                     gold_last_commit_wall.clear()
                     gold_last_commit_wall.append(wall_offset)
                 gold_tracker_stop.wait(STABLE_POLL_SECS)
@@ -610,8 +618,8 @@ def run_once(
     catchup_ratio = round(pipeline_lag / WARMUP_SECS, 2) if WARMUP_SECS > 0 and pipeline_lag >= 0 else -1.0
     silver_to_bronze_ratio = round(rows_s / rows_b, 4) if rows_b > 0 else -1.0
 
-    print(f"\n  ── Staleness (Gold during run) ──────────────────────────────")
-    print(f"     avg={staleness_mon.avg_s}s  max={staleness_mon.max_s}s  min={staleness_mon.min_s}s")
+    print(f"\n  ── Staleness (post-first-Gold) ──────────────────────────────")
+    print(f"     avg={staleness_mon.avg_s}s  max={staleness_mon.max_s}s  min={staleness_mon.min_s}s  [samples={len(staleness_mon.samples)} total, {len(staleness_mon._vals())} post-first-gold]")
     print(f"  ── First-message latency ────────────────────────────────────")
     print(f"     Gold first commit at {first_gold_latency}s after producer start")
     print(f"  ── Catch-up lag (after producer stop) ───────────────────────")

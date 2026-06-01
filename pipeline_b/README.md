@@ -25,7 +25,7 @@ GOLD_ONLY ?= daily_intraday_summary
 ## 1. Start Intraday Pipeline
 
 ```bash
-cd ~/data-pipeline-comparison/pipeline_b
+cd ~/spark-flink-stack-compare/pipeline_b
 git pull
 
 docker compose up -d
@@ -88,7 +88,7 @@ Pass criteria:
 ```text
 Bronze rows added > 0
 Silver rows added > 0
-Gold rows added > 0
+Gold refreshed = yes
 benchmark/results_*.csv is created
 ```
 
@@ -97,14 +97,25 @@ benchmark/results_*.csv is created
 Run three request-rate levels, with one warmup run and three measured runs per level:
 
 ```bash
-PYTHONUNBUFFERED=1 \
-REQUEST_RATES=50,100,200 \
-N_RUNS=3 \
-WARMUP_RUNS=1 \
-WARMUP_SECS=10 \
-STABLE_MAX_WAIT=800 \
-PARALLELISM=6 \
-bash benchmark/run_benchmark.sh
+for rate in 50 100 200; do
+  echo "===== Flink Iceberg HDFS rate=$rate ====="
+
+  docker compose down -v
+  docker compose up -d
+  sleep 60
+  make init
+
+  PYTHONUNBUFFERED=1 \
+  REQUEST_RATES=$rate \
+  N_RUNS=3 \
+  WARMUP_RUNS=1 \
+  WARMUP_SECS=10 \
+  STABLE_MAX_WAIT=800 \
+  PARALLELISM=6 \
+  bash benchmark/run_benchmark.sh
+
+  echo "===== Done rate=$rate ====="
+done
 ```
 
 Request-rate mapping with default `DELAY=0.1`:
@@ -118,14 +129,21 @@ Request-rate mapping with default `DELAY=0.1`:
 If time is limited, run one measured run per level first:
 
 ```bash
-PYTHONUNBUFFERED=1 \
-REQUEST_RATES=50,100,200 \
-N_RUNS=1 \
-WARMUP_RUNS=1 \
-WARMUP_SECS=10 \
-STABLE_MAX_WAIT=800 \
-PARALLELISM=6 \
-bash benchmark/run_benchmark.sh
+for rate in 50 100 200; do
+  docker compose down -v
+  docker compose up -d
+  sleep 60
+  make init
+
+  PYTHONUNBUFFERED=1 \
+  REQUEST_RATES=$rate \
+  N_RUNS=1 \
+  WARMUP_RUNS=1 \
+  WARMUP_SECS=10 \
+  STABLE_MAX_WAIT=800 \
+  PARALLELISM=6 \
+  bash benchmark/run_benchmark.sh
+done
 ```
 
 ## 4. Result Files
@@ -147,15 +165,18 @@ Useful report metrics:
 ```text
 req_per_sec
 gold_e2e_s
+pipeline_e2e_s
+processing_overhead_s
 first_gold_latency_s
 avg_staleness_s
 max_staleness_s
 bronze_lag_s
 silver_lag_s
 gold_lag_s
-bronze_tps
-silver_tps
-gold_tps
+bronze_throughput_rps
+silver_throughput_rps
+row_integrity_ok
+silver_to_bronze_ratio
 engine_ram_mb
 ```
 

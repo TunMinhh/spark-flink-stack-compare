@@ -4,7 +4,7 @@ This repository contains two comparable realtime data pipelines for wearable
 intraday signals.
 
 - `pipeline_a/`: Spark Structured Streaming + Delta Lake + HDFS
-- `pipeline_b/`: Apache Flink + Apache Iceberg + MinIO/S3
+- `pipeline_b/`: Apache Flink + Apache Iceberg + HDFS
 
 Both pipelines ingest the same `producer_realtime.py` workload and process only
 the realtime intraday path:
@@ -89,5 +89,7 @@ PYTHONUNBUFFERED=1 REQUEST_RATES=5 N_RUNS=1 WARMUP_RUNS=0 WARMUP_SECS=10 \
   placeholders/defaults.
 - `data/*.csv` is intended to be committed if the benchmark dataset should
   travel with the repo.
+- Pipeline B uses HDFS as the Iceberg warehouse for the benchmark path. MinIO
+  remains only for MLflow artifact storage.
 - For a clean serving database after schema changes or old runs, use
   `make reset-pg-sink` inside the selected pipeline.

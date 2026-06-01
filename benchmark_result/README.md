@@ -10,7 +10,7 @@ producer_realtime.py
 -> Gold daily_intraday_summary
 ```
 
-Pipeline A uses Spark Structured Streaming + Delta Lake + HDFS. Pipeline B uses Flink + Iceberg + MinIO. Run the two stacks separately on the same VM because ports and container names overlap.
+Pipeline A uses Spark Structured Streaming + Delta Lake + HDFS. Pipeline B uses Flink + Iceberg + HDFS. Run the two stacks separately on the same VM because ports, container names, and RAM allocations overlap.
 
 ## Fairness Contract
 
@@ -27,6 +27,8 @@ Pipeline A uses Spark Structured Streaming + Delta Lake + HDFS. Pipeline B uses 
 | Reset between warmup/measured runs inside one rate | No | No |
 | Stable wait timeout | `800s` | `800s` |
 | Kafka partitions | `12` | `12` |
+| Storage backend | HDFS | HDFS |
+| Warehouse path | `hdfs://namenode:9000/data/...` | `hdfs://namenode:9000/warehouse/iceberg` |
 | Main compute knob | `SHUFFLE_PARTITIONS=18` | `PARALLELISM=6` |
 | Trigger/checkpoint | Spark triggers `15s` | Flink checkpoints `15s` |
 | Gold target | `daily_intraday_summary` | `daily_intraday_summary` |
@@ -38,7 +40,7 @@ Each request-rate tier starts from a clean pipeline state. Inside that tier, the
 Run from the VM:
 
 ```bash
-cd ~/data-pipeline-comparison/pipeline_a
+cd ~/spark-flink-stack-compare/pipeline_a
 ```
 
 Smoke test:
@@ -97,14 +99,16 @@ Spark benchmark notes:
 Run from the VM:
 
 ```bash
-cd ~/data-pipeline-comparison/pipeline_b
+cd ~/spark-flink-stack-compare/pipeline_b
 ```
 
 Smoke test:
 
 ```bash
 make cancel-all || true
-make reset
+docker compose down -v
+docker compose up -d
+sleep 60
 make init
 
 PYTHONUNBUFFERED=1 \
@@ -122,8 +126,9 @@ Official benchmark with reset between request rates:
 for rate in 50 100 200; do
   echo "===== Flink rate=$rate ====="
 
-  make cancel-all || true
-  make reset
+  docker compose down -v
+  docker compose up -d
+  sleep 60
   make init
 
   REQUEST_RATES=$rate \
@@ -148,6 +153,9 @@ Flink benchmark notes:
 
 - The runner starts missing Bronze/Silver/Gold Flink jobs automatically.
 - It does not pre-seed static CSV data for the official workload.
+- Iceberg uses HDFS as the warehouse. If an error still references
+  `s3://iceberg`, the old Iceberg catalog volume was not removed; rerun
+  `docker compose down -v`.
 - If a run has `row_integrity_ok=false`, do not use it for headline comparison.
 
 ## Running Safely Over SSH

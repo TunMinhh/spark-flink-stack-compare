@@ -8,13 +8,17 @@ The benchmark emits intraday events, then observes Delta commit timestamps and
 row deltas to measure freshness, catch-up lag, throughput, and memory.
 
 Measurement methodology (v2):
-  Stabilisation polling uses a fast O(1) directory-mtime check
-  (`hdfs dfs -stat "%Y" path/_delta_log/`) instead of reading all log-file
-  JSON content on every poll.  Row counts are read exactly twice per run:
-  once at baseline (before the producer starts) and once after the mtime-based
-  stabilisation signal fires.  This removes the O(n log files) subprocess cost
-  from the hot poll loop and makes the latency measurement comparable in
-  overhead to Pipeline B's Iceberg REST API approach.
+  Stabilisation polling uses latest_delta_ts_ms() which reads at most 1-2 log
+  files per table (scans backwards from the latest, stops at the first file
+  with a real commitInfo.timestamp).  This is O(1) in log-file count regardless
+  of how many commits have accumulated.  Empty txn-only commits written by
+  Spark between triggers have no commitInfo.timestamp and are transparently
+  skipped.
+
+  Row counts are called exactly twice per run: once at baseline (before the
+  producer starts) and once after the timestamp-based stabilisation fires.
+  This removes the O(n) delta_row_count from the hot poll loop while keeping
+  the same semantics as Pipeline B's Iceberg REST approach.
 """
 
 from __future__ import annotations
@@ -69,30 +73,7 @@ def _hdfs(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
     )
 
 
-# ── Fast O(1) mtime-based commit detection ───────────────────────────────────
-
-def latest_delta_mtime_ms(table_path: str) -> int:
-    """Return the mtime (ms since epoch) of the _delta_log/ directory.
-
-    HDFS updates the directory mtime whenever a new log file is created, so
-    this fires on every Delta commit with a single metadata call — O(1)
-    regardless of how many log files have accumulated.  Used for the
-    stabilisation poll loop to avoid reading log-file content on every tick.
-    """
-    r = _hdfs(["-stat", "%Y", f"{table_path}/_delta_log/"], timeout=10)
-    if r.returncode != 0:
-        return 0
-    try:
-        return int(r.stdout.strip())
-    except (ValueError, AttributeError):
-        return 0
-
-
-def latest_delta_mtime_ms_many(table_paths: list[str]) -> dict[str, int]:
-    return {p: latest_delta_mtime_ms(p) for p in table_paths}
-
-
-# ── Slow O(n) log-scan helpers — used only at baseline and final check ────────
+# ── O(n) log-scan helpers — used only at baseline and final row-count check ──
 
 def delta_json_logs(table_path: str) -> list[str]:
     r = _hdfs(["-ls", f"{table_path}/_delta_log/"])
@@ -119,7 +100,36 @@ def _read_json_lines(path: str) -> list[dict]:
     return out
 
 
-# Cache: table_path -> (latest_mtime_ms, row_count)
+def latest_delta_ts_ms(table_path: str) -> int:
+    """Return the latest real commit timestamp-ms from the Delta log.
+
+    Reads at most MAX_TAIL_READS log files, scanning from newest to oldest and
+    stopping as soon as a non-empty commitInfo.timestamp is found.  Spark
+    Structured Streaming writes txn-only (empty) commits at the start of each
+    trigger; those have no commitInfo.timestamp and are skipped.  In practice
+    this means we read exactly 1-2 files per call — O(1) in log-file count.
+    """
+    MAX_TAIL_READS = 4   # safety cap; normally stops at 1 or 2
+    logs = delta_json_logs(table_path)
+    if not logs:
+        return 0
+    for log in reversed(logs[-MAX_TAIL_READS:]):
+        best = 0
+        for action in _read_json_lines(log):
+            if "commitInfo" in action:
+                best = max(best, int(action["commitInfo"].get("timestamp", 0) or 0))
+            if "add" in action:
+                best = max(best, int(action["add"].get("modificationTime", 0) or 0))
+        if best > 0:
+            return best
+    return 0
+
+
+def latest_delta_ts_ms_many(table_paths: list[str]) -> dict[str, int]:
+    return {p: latest_delta_ts_ms(p) for p in table_paths}
+
+
+# Cache: table_path -> (latest_commit_ts_ms, row_count)
 _delta_count_cache: dict[str, tuple[int, int]] = {}
 
 
@@ -173,70 +183,71 @@ def delta_row_count_by_table(table_paths: list[str]) -> dict[str, int]:
     return {path: delta_row_count(path) for path in table_paths}
 
 
-# ── Stabilisation helpers (mtime-based, O(1) per poll) ───────────────────────
+# ── Stabilisation helpers (timestamp-based, O(1-2 files) per poll) ───────────
 
 def wait_for_stable(
     table_path: str,
-    baseline_mtime: int,
+    baseline_ts: int,
     label: str,
 ) -> tuple[float, int, bool]:
-    """Block until _delta_log/ mtime advances past baseline and stays
+    """Block until a new real commit timestamp appears and then stays
     unchanged for STABLE_POLLS_REQUIRED consecutive polls.
 
-    Uses O(1) directory-mtime check on every poll — no log-file reads.
+    Uses latest_delta_ts_ms() which reads at most 1-2 log files per call and
+    skips empty txn-only commits — O(1) in log-file count.
     Row-count verification is done by the caller after this returns.
     """
     start    = time.time()
-    last_mt  = 0
+    last_ts  = 0
     stable_n = 0
     while time.time() - start < STABLE_MAX_WAIT:
-        mt = latest_delta_mtime_ms(table_path)
-        if mt > baseline_mtime:
-            if mt == last_mt:
+        ts = latest_delta_ts_ms(table_path)
+        if ts > baseline_ts:
+            if ts == last_ts:
                 stable_n += 1
                 if stable_n >= STABLE_POLLS_REQUIRED:
                     waited = round(time.time() - start, 2)
                     print(f"    [stable] {label} → {waited}s")
-                    return waited, mt, True
+                    return waited, ts, True
             else:
-                last_mt  = mt
+                last_ts  = ts
                 stable_n = 0
         time.sleep(STABLE_POLL_SECS)
     print(f"    [TIMEOUT] {label} did not stabilise within {STABLE_MAX_WAIT}s")
-    return float(STABLE_MAX_WAIT), last_mt, False
+    return float(STABLE_MAX_WAIT), last_ts, False
 
 
 def wait_for_stable_many(
     table_paths: list[str],
-    baseline_mtime: dict[str, int],
+    baseline_ts: dict[str, int],
     label: str,
 ) -> tuple[float, int, bool]:
-    """Block until every table's _delta_log/ mtime advances and all stop
-    moving simultaneously.  O(1) per table per poll.
+    """Block until every table has a new real commit timestamp and all
+    stop moving simultaneously.  O(1-2 files) per table per poll.
     """
-    start        = time.time()
-    last_mtimes: dict[str, int] = {}
-    stable_n     = 0
+    start       = time.time()
+    last_ts_map: dict[str, int] = {}
+    stable_n    = 0
     while time.time() - start < STABLE_MAX_WAIT:
-        current = latest_delta_mtime_ms_many(table_paths)
-        all_new = all(current[p] > baseline_mtime[p] for p in table_paths)
+        current = latest_delta_ts_ms_many(table_paths)
+        all_new = all(current[p] > baseline_ts[p] for p in table_paths)
         if all_new:
-            if current == last_mtimes:
+            if current == last_ts_map:
                 stable_n += 1
                 if stable_n >= STABLE_POLLS_REQUIRED:
-                    waited    = round(time.time() - start, 2)
-                    final_mt  = min(current.values())
+                    waited   = round(time.time() - start, 2)
+                    final_ts = min(current.values())
                     print(f"    [stable] {label} → {waited}s")
-                    return waited, final_mt, True
+                    return waited, final_ts, True
             else:
-                last_mtimes = dict(current)
+                last_ts_map = dict(current)
                 stable_n    = 0
         time.sleep(STABLE_POLL_SECS)
     print(f"    [TIMEOUT] {label} did not stabilise within {STABLE_MAX_WAIT}s")
-    return float(STABLE_MAX_WAIT), min(last_mtimes.values()) if last_mtimes else 0, False
+    return float(STABLE_MAX_WAIT), min(last_ts_map.values()) if last_ts_map else 0, False
 
 
-# ── Staleness monitor (uses mtime — O(1) per sample) ─────────────────────────
+# ── Staleness monitor (uses latest_delta_ts_ms — O(1-2 files) per sample) ───
 
 class StalenessMonitor:
     def __init__(self, table_path: str):
@@ -259,9 +270,9 @@ class StalenessMonitor:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            mt_ms = latest_delta_mtime_ms(self.table_path)
-            if mt_ms > 0:
-                staleness = max(0.0, time.time() - mt_ms / 1000.0)
+            ts_ms = latest_delta_ts_ms(self.table_path)
+            if ts_ms > 0:
+                staleness = max(0.0, time.time() - ts_ms / 1000.0)
                 self.samples.append({
                     "wall_s":      round(time.time() - self._t0, 1),
                     "staleness_s": round(staleness, 1),
@@ -400,10 +411,10 @@ def run_once(
     print(f"[A] Run {run_idx}  ≈{rps} req/s{tag}")
     print(f"{'=' * 70}")
 
-    # ── Baselines — O(1) mtime + O(n) row count, done once ───────────────────
-    base_b_mtime = latest_delta_mtime_ms_many(BRONZE_WATCH_TABLES)
-    base_s_mtime = latest_delta_mtime_ms_many(SILVER_WATCH_TABLES)
-    base_g_mtime = latest_delta_mtime_ms(GOLD_WATCH)
+    # ── Baselines — O(1-2 files) timestamp + O(n) row count, each done once ──
+    base_b_ts = latest_delta_ts_ms_many(BRONZE_WATCH_TABLES)
+    base_s_ts = latest_delta_ts_ms_many(SILVER_WATCH_TABLES)
+    base_g_ts = latest_delta_ts_ms(GOLD_WATCH)
 
     base_b_rows_by_table = delta_row_count_by_table(BRONZE_WATCH_TABLES)
     base_s_rows_by_table = delta_row_count_by_table(SILVER_WATCH_TABLES)
@@ -432,7 +443,7 @@ def run_once(
         t_prod_stop = round(time.time() - t0, 2)
         print(
             f"  [producer] Stopped at {t_prod_stop}s — "
-            "waiting for Delta commits to stabilise (mtime polling) ..."
+            "waiting for Delta commits to stabilise (tail-log polling) ..."
         )
 
         wait_results: dict[str, tuple[float, bool]] = {}
@@ -441,17 +452,17 @@ def run_once(
             *_, ok = fn()
             wait_results[name] = (round(time.time() - t0, 2), ok)
 
-        # Gold commit tracker — O(1) mtime check, same approach as Pipeline B
+        # Gold commit tracker — O(1-2 files), skips empty txn-only commits
         gold_last_commit_wall: list[float] = []
         gold_tracker_stop = threading.Event()
 
         def _track_gold_commits() -> None:
-            last_mt = base_g_mtime
+            last_ts = base_g_ts
             while not gold_tracker_stop.is_set():
-                mt = latest_delta_mtime_ms(GOLD_WATCH)
-                if mt > last_mt:
+                ts = latest_delta_ts_ms(GOLD_WATCH)
+                if ts > last_ts:
                     wall_offset = round(time.time() - t0, 2)
-                    last_mt     = mt
+                    last_ts     = ts
                     if not first_gold_wall:
                         first_gold_wall.append(wall_offset)
                     gold_last_commit_wall.clear()
@@ -468,7 +479,7 @@ def run_once(
                 args=(
                     "bronze",
                     lambda: wait_for_stable_many(
-                        BRONZE_WATCH_TABLES, base_b_mtime, "Bronze"
+                        BRONZE_WATCH_TABLES, base_b_ts, "Bronze"
                     ),
                 ),
                 daemon=True,
@@ -478,7 +489,7 @@ def run_once(
                 args=(
                     "silver",
                     lambda: wait_for_stable_many(
-                        SILVER_WATCH_TABLES, base_s_mtime, "Silver"
+                        SILVER_WATCH_TABLES, base_s_ts, "Silver"
                     ),
                 ),
                 daemon=True,
@@ -699,7 +710,7 @@ def main() -> None:
     print(f"Request rates  : {REQUEST_RATES} users/tick")
     print(f"Warmup runs    : {WARMUP_RUNS}  Measured runs: {N_RUNS}")
     print(f"Burst duration : {WARMUP_SECS}s equivalent ({MAX_TICKS} fixed ticks)")
-    print(f"Polling method : O(1) mtime-based (hdfs dfs -stat)")
+    print(f"Polling method : O(1-2 files) timestamp-based (reads tail of Delta log)")
     print(f"Results        : {RESULTS_FILE}")
     print(f"Staleness      : {STALENESS_FILE}")
 

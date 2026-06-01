@@ -101,41 +101,40 @@ def _read_json_lines(path: str) -> list[dict]:
 
 
 def latest_delta_ts_ms(table_path: str) -> int:
-    """Return the timestamp-ms of the latest Delta commit that wrote real data.
+    """Return the latest commit timestamp-ms from the Delta log.
 
-    A commit is considered "real" only if it contains at least one 'add' action
-    (i.e. it actually wrote Parquet data files).  Spark Structured Streaming
-    writes two kinds of commits that must be ignored:
+    Scans backwards from the newest log file and returns the timestamp of the
+    most recent commit that has either a commitInfo.timestamp or an add-action
+    modificationTime.  This intentionally includes empty end-of-trigger commits
+    (commitInfo present, no add actions) written by Spark Structured Streaming
+    between data-bearing triggers.
 
-      1. Txn-only start-of-trigger commits — no commitInfo.timestamp, no 'add'.
-         (Already skipped by the original logic.)
-      2. Empty end-of-trigger commits — HAVE commitInfo.timestamp but NO 'add'
-         actions, written when a micro-batch produced zero rows.  These are the
-         source of the stability-checker inflation: the old code returned the
-         timestamp of these empty commits, causing wait_for_stable* to reset its
-         counter on every idle trigger and over-report bronze_lag / silver_lag
-         by ~40-67 s per run.
+    Rationale: empty commits are real Delta table activity.  A downstream
+    consumer polling the table timestamp cannot distinguish an empty commit from
+    a data commit via the public API, so it must wait until the table is truly
+    quiescent.  bronze_lag / silver_lag therefore measure *table settlement
+    time* — the interval until Spark's streaming engine stops touching the
+    table — which is the correct latency figure from a consumer's perspective.
+    Flink+Iceberg never creates empty snapshots, so Iceberg tables settle
+    immediately after the last data checkpoint; that architectural difference is
+    what the comparison captures.
 
-    Fix: only accept a log file's timestamp when it contains at least one 'add'
-    action.  Scans backwards from the newest file, stopping at the first commit
-    with real data.  MAX_TAIL_READS is raised to 20 to cover up to ~5 minutes
-    of 15-second idle triggers before the last real-data commit.
+    Txn-only start-of-trigger commits (no commitInfo.timestamp, no add) are
+    still skipped because they carry no observable timestamp.
     """
-    MAX_TAIL_READS = 20  # raised from 4: covers ~5 min of empty 15 s triggers
+    MAX_TAIL_READS = 4   # normally stops at 1-2 files; cap for safety
     logs = delta_json_logs(table_path)
     if not logs:
         return 0
     for log in reversed(logs[-MAX_TAIL_READS:]):
-        ts = 0
-        has_add = False
+        best = 0
         for action in _read_json_lines(log):
             if "commitInfo" in action:
-                ts = max(ts, int(action["commitInfo"].get("timestamp", 0) or 0))
+                best = max(best, int(action["commitInfo"].get("timestamp", 0) or 0))
             if "add" in action:
-                has_add = True
-                ts = max(ts, int(action["add"].get("modificationTime", 0) or 0))
-        if has_add and ts > 0:   # skip empty end-of-trigger commits
-            return ts
+                best = max(best, int(action["add"].get("modificationTime", 0) or 0))
+        if best > 0:
+            return best
     return 0
 
 
@@ -197,19 +196,20 @@ def delta_row_count_by_table(table_paths: list[str]) -> dict[str, int]:
     return {path: delta_row_count(path) for path in table_paths}
 
 
-# ── Stabilisation helpers (data-commit-based, skips empty triggers) ──────────
+# ── Stabilisation helpers (timestamp-based, O(1-2 files) per poll) ───────────
 
 def wait_for_stable(
     table_path: str,
     baseline_ts: int,
     label: str,
 ) -> tuple[float, int, bool]:
-    """Block until a real-data commit timestamp appears and then stays
-    unchanged for STABLE_POLLS_REQUIRED consecutive polls.
+    """Block until a new commit timestamp appears and then stays unchanged
+    for STABLE_POLLS_REQUIRED consecutive polls.
 
-    Uses latest_delta_ts_ms() which now requires at least one 'add' action
-    before accepting a commit's timestamp, so idle end-of-trigger commits
-    (commitInfo present but no data files) no longer reset the counter.
+    Uses latest_delta_ts_ms() which counts any commit with a timestamp,
+    including Spark's empty end-of-trigger commits.  The layer is declared
+    stable only when Spark's streaming engine stops touching the Delta table
+    entirely — the correct consumer-facing definition of settlement.
     Row-count verification is done by the caller after this returns.
     """
     start    = time.time()
@@ -237,10 +237,11 @@ def wait_for_stable_many(
     baseline_ts: dict[str, int],
     label: str,
 ) -> tuple[float, int, bool]:
-    """Block until every table has a new real-data commit timestamp and all
-    stop moving simultaneously.  Empty end-of-trigger commits are ignored
-    by latest_delta_ts_ms, so the counter only resets when actual data files
-    are written — giving an accurate bronze_lag / silver_lag.
+    """Block until every table has a new commit timestamp and all stop moving
+    simultaneously.  Both real-data commits and empty end-of-trigger commits
+    are counted, so the layer is declared stable only when Spark's streaming
+    engine stops touching ALL tables — the correct consumer-facing settlement
+    point.  O(1-2 files) per table per poll.
     """
     start       = time.time()
     last_ts_map: dict[str, int] = {}

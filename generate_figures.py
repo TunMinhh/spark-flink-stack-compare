@@ -1,7 +1,10 @@
 """
-Generate fig1_e2e_latency.png and fig2_layer_lag.png
+Generate fig1_e2e_latency.png, fig1b_staleness.png, and fig2_layer_lag.png
 from benchmark result CSVs.
 Output: /mnt/c/Users/tranm/Downloads/
+
+Staleness uses corrected post-first-Gold values from staleness_corrected.csv.
+E2E and lag metrics are loaded directly from per-pipeline result CSVs.
 """
 
 import csv
@@ -13,7 +16,6 @@ from pathlib import Path
 BASE   = Path(__file__).parent / "benchmark_result"
 OUTDIR = Path("/mnt/c/Users/tranm/Downloads")
 
-# New Spark results use corrected O(1-2 file) measurement methodology
 SPARK_FILES = {
     1500: BASE / "spark_result/50_result.csv",
     3000: BASE / "spark_result/100_result.csv",
@@ -24,6 +26,8 @@ FLINK_FILES = {
     3000: BASE / "flink_result/100_result.csv",
     6000: BASE / "flink_result/200_result.csv",
 }
+# Rate → users_per_tick mapping for staleness_corrected lookup
+RATE_TO_UPT = {1500: 50, 3000: 100, 6000: 200}
 RATES = [1500, 3000, 6000]
 
 
@@ -58,12 +62,38 @@ def extract(files, key):
     return result
 
 
+def load_corrected_staleness():
+    """Load post-first-Gold corrected staleness from staleness_corrected.csv.
+    Returns {pipeline_name: {rate: (mean_corr_avg, std_corr_avg)}}.
+    """
+    path = BASE / "staleness_corrected.csv"
+    data = {"spark": {}, "flink": {}}
+    # Collect per-run corr_avg_s grouped by (pipeline, rate)
+    groups: dict[tuple, list[float]] = {}
+    upt_to_rate = {50: 1500, 100: 3000, 200: 6000}
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            if row["is_warmup"].strip().lower() in ("true", "1"):
+                continue
+            pipeline = row["pipeline"]          # "spark" or "flink"
+            upt      = int(row["rate"])          # users_per_tick: 50/100/200
+            rate     = upt_to_rate.get(upt, upt) # map to events/s: 1500/3000/6000
+            key = (pipeline, rate)
+            groups.setdefault(key, []).append(float(row["corr_avg_s"]))
+    for (pipeline, rate), vals in groups.items():
+        if pipeline in data:
+            data[pipeline][rate] = (mean(vals), std(vals))
+    return data
+
+
 # ── Pull all metrics ──────────────────────────────────────────────────────────
+corrected_staleness = load_corrected_staleness()
+
 metrics = {}
 for label, files in [("flink", FLINK_FILES), ("spark", SPARK_FILES)]:
     metrics[label] = {
         "e2e":        extract(files, "gold_e2e_s"),
-        "staleness":  extract(files, "avg_staleness_s"),
+        "staleness":  corrected_staleness[label],   # corrected post-first-Gold
         "bronze_lag": extract(files, "bronze_lag_s"),
         "silver_lag": extract(files, "silver_lag_s"),
         "gold_lag":   extract(files, "gold_lag_s"),
@@ -92,19 +122,10 @@ COL_FLINK = "#2166ac"   # blue
 COL_SPARK = "#d6604d"   # red-orange
 HATCH_F   = ""
 HATCH_S   = "///"
-RATE_LABELS = ["1,500", "3,000", "6,000"]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FIGURE 1 — E2E latency  +  Avg Gold staleness
-# ══════════════════════════════════════════════════════════════════════════════
-fig1, axes = plt.subplots(1, 2, figsize=(14, 5.5))
-fig1.subplots_adjust(wspace=0.35)
-
-for ax, met_key, title, ylabel in [
-    (axes[0], "e2e",       "(a) End-to-End Latency",    "Latency (s)"),
-    (axes[1], "staleness", "(b) Average Gold Staleness", "Staleness (s)"),
-]:
+def _draw_bar_chart(ax, met_key, title, ylabel, show_legend=True, footnote=None):
+    """Draw a paired bar chart on ax for the given metric."""
     x      = np.arange(len(RATES))
     width  = 0.30
     offset = 0.17
@@ -131,7 +152,7 @@ for ax, met_key, title, ylabel in [
         zorder=3,
     )
 
-    # Value labels on Flink bars (small, top)
+    # Value labels on Flink bars
     for bar, val in zip(bars_f, flink_means):
         ax.text(
             bar.get_x() + bar.get_width() / 2,
@@ -141,9 +162,8 @@ for ax, met_key, title, ylabel in [
         )
 
     # Ratio annotations above Spark bars
-    for i, (sm, fm, se) in enumerate(zip(spark_means, flink_means, spark_stds)):
+    for sm, fm, se, bar in zip(spark_means, flink_means, spark_stds, bars_s):
         ratio = sm / fm if fm > 0 else 0
-        bar = bars_s[i]
         ax.text(
             bar.get_x() + bar.get_width() / 2,
             bar.get_height() + se + max(spark_means) * 0.02,
@@ -161,18 +181,29 @@ for ax, met_key, title, ylabel in [
     ax.set_axisbelow(True)
     ax.spines[["top", "right"]].set_visible(False)
 
-    if ax is axes[0]:
+    if show_legend:
         ax.legend(loc="upper left", framealpha=0.9)
 
-    # Footnote about Spark SD
-    ax.annotate(
-        "†Pipeline A SD reflects accumulation trend, not variance.",
-        xy=(0, -0.18), xycoords="axes fraction",
-        fontsize=7.5, color="gray", style="italic",
-    )
+    if footnote:
+        ax.annotate(
+            footnote,
+            xy=(0, -0.18), xycoords="axes fraction",
+            fontsize=7.5, color="gray", style="italic",
+        )
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FIGURE 1a — End-to-End Latency  (standalone)
+# ══════════════════════════════════════════════════════════════════════════════
+fig1, ax1 = plt.subplots(figsize=(7, 5.5))
+_draw_bar_chart(
+    ax1, "e2e",
+    title="End-to-End Latency",
+    ylabel="Latency (s)",
+    show_legend=True,
+)
 fig1.suptitle(
-    "Figure 1. End-to-end latency and average Gold staleness across three load levels.\n"
+    "Figure 1. End-to-end latency across three load levels.\n"
     "Error bars = SD of 3 measured runs. Ratios (italic) = Spark ÷ Flink.",
     fontsize=9.5, y=0.01, va="bottom",
 )
@@ -180,6 +211,28 @@ fig1.tight_layout(rect=[0, 0.07, 1, 1])
 out1 = OUTDIR / "fig1_e2e_latency.png"
 fig1.savefig(out1, bbox_inches="tight")
 print(f"Saved {out1}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FIGURE 1b — Average Gold Staleness  (standalone, corrected data)
+# ══════════════════════════════════════════════════════════════════════════════
+fig1b, ax1b = plt.subplots(figsize=(7, 5.5))
+_draw_bar_chart(
+    ax1b, "staleness",
+    title="Average Gold Staleness (post-first-commit)",
+    ylabel="Staleness (s)",
+    show_legend=True,
+    footnote="†Measured from first Gold commit of each run; pre-commit idle samples excluded.",
+)
+fig1b.suptitle(
+    "Figure 2. Average Gold staleness across three load levels.\n"
+    "Error bars = SD of 3 measured runs. Ratios (italic) = Spark ÷ Flink.",
+    fontsize=9.5, y=0.01, va="bottom",
+)
+fig1b.tight_layout(rect=[0, 0.07, 1, 1])
+out1b = OUTDIR / "fig1b_staleness.png"
+fig1b.savefig(out1b, bbox_inches="tight")
+print(f"Saved {out1b}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

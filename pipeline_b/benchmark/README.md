@@ -76,3 +76,10 @@ benchmark/benchmark_YYYYMMDD_HHMMSS.log
 Primary metrics: `pipeline_e2e_s`, `processing_overhead_s`,
 `first_gold_latency_s`, `avg_staleness_s`, `max_staleness_s`,
 `row_integrity_ok`, `silver_to_bronze_ratio`, and `engine_ram_mb`.
+
+## Staleness Methodology
+
+`avg_staleness_s` in `results_*.csv` covers all samples from t=0, including
+the pre-Gold-commit ramp-up. For the corrected (post-first-Gold) staleness
+values used in the paper, run `benchmark_result/recompute_staleness.py` after
+collecting results — it outputs `benchmark_result/staleness_corrected.csv`.

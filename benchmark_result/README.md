@@ -253,9 +253,9 @@ rules, not guessed from metric names.
 | `silver_lag_s` | Silver catch-up lag after producer stop. | `max(0, t_silver - producer_stop_s)`. |
 | `gold_lag_s` | Gold catch-up lag after producer stop. | `max(0, t_gold - producer_stop_s)`. |
 | `first_gold_latency_s` | Time to the first observed Gold commit/refresh. | First Gold commit wall-clock time from producer start; `-1` if not observed. |
-| `avg_staleness_s` | Average age of the latest Gold output while monitoring. | Average of `now - latest_gold_commit_time` samples. |
-| `max_staleness_s` | Worst observed Gold freshness gap. | Maximum sampled staleness in seconds. |
-| `min_staleness_s` | Best observed Gold freshness gap. | Minimum sampled staleness in seconds. |
+| `avg_staleness_s` | Average age of the latest Gold output, sampled from t=0 (raw, **not corrected**). Inflated by the inter-run idle gap; use `staleness_corrected.csv` for the paper-reported corrected values. | Average of all `now - latest_gold_commit_time` samples from producer start. |
+| `max_staleness_s` | Worst observed Gold staleness (raw, same caveat). | Maximum sampled staleness in seconds from t=0. |
+| `min_staleness_s` | Best observed Gold staleness. | Minimum sampled staleness in seconds. |
 | `catchup_ratio` | How many burst durations the pipeline needed to catch up after input ended. | `processing_overhead_s / warmup_secs`. Lower is better. |
 
 ### Rows and throughput
@@ -293,22 +293,57 @@ rules, not guessed from metric names.
 
 ### Staleness CSV
 
-The `staleness_*.csv` files store the raw samples used to compute
-`avg_staleness_s`, `max_staleness_s`, and `min_staleness_s`.
+The `staleness_*.csv` files store the raw per-sample data; every sample from
+t=0 is included (pre-Gold-commit samples and post-Gold-commit samples alike).
 
-| Metric | Meaning | How it is calculated |
-|---|---|---|
-| `pipeline` | Pipeline label for the sample. | `A` for Spark, `B` for Flink. |
-| `run_label` | Human-readable run identifier. | Includes offered rate and run number. |
-| `users_per_tick` | Producer users per tick for this run. | Same as result CSV. |
-| `req_per_sec` | Offered event rate. | Same as result CSV. |
-| `is_warmup` | Whether the sample belongs to a warmup run. | Same as result CSV. |
-| `wall_s` | Sample time. | Seconds from producer start when the staleness sample was recorded. |
-| `staleness_s` | Gold output age at that sample. | `sample_time - latest_observed_gold_commit_time`. Lower means fresher Gold output. |
+| Column | Meaning |
+|---|---|
+| `pipeline` | `A` (Spark) or `B` (Flink). |
+| `run_label` | Human-readable run identifier including offered rate and run number. |
+| `users_per_tick` | Producer users per tick (50 / 100 / 200). |
+| `req_per_sec` | Offered event rate in rows/s. |
+| `is_warmup` | `True` for warmup runs; exclude from reported averages. |
+| `wall_s` | Seconds from producer start when this sample was recorded. |
+| `staleness_s` | `now - latest_observed_gold_commit_time` at sample time. Lower = fresher. |
 
-Interpretation rules:
+### Corrected Staleness
 
-- Exclude `is_warmup=true` from reported averages.
-- Use only runs with `row_integrity_ok=true` for headline latency comparison.
-- If Spark times out but later catches up, record it as a non-converged run for that timeout window, not data loss.
-- Because both pipelines use different table formats and commit protocols, report results as end-to-end workload measurements, not identical operator-level measurements.
+`staleness_corrected.csv` is produced by `recompute_staleness.py`. It joins
+the raw staleness samples with `first_gold_latency_s` from `results_*.csv` and
+keeps only samples where `wall_s >= first_gold_latency_s` for each run. This
+removes Phase 1 (pre-first-Gold-commit) samples whose staleness reflects the
+inter-run idle gap rather than pipeline-induced freshness delay.
+
+| Column | Meaning |
+|---|---|
+| `rate` | `users_per_tick` (50 / 100 / 200). |
+| `pipeline` | `spark` or `flink`. |
+| `run_label` | Same as staleness CSV. |
+| `is_warmup` | Same as staleness CSV. |
+| `first_gold_latency_s` | Wall time of first Gold commit; used as the trim boundary. |
+| `n_samples_total` | Total samples in the raw staleness CSV for this run. |
+| `n_samples_post_first_gold` | Samples at or after first Gold commit. |
+| `corr_avg_s` | Corrected average staleness (post-first-Gold only). |
+| `corr_max_s` | Corrected max staleness. |
+| `corr_min_s` | Corrected min staleness. |
+| `orig_avg_s` | Original (raw) average staleness for comparison. |
+| `orig_max_s` | Original max staleness for comparison. |
+
+To regenerate:
+
+```bash
+cd benchmark_result
+python3 recompute_staleness.py
+```
+
+### Interpretation Rules
+
+- Exclude `is_warmup=true` rows from all reported averages.
+- Use only runs with `row_integrity_ok=true` for headline latency comparisons.
+- Use `corr_avg_s` / `corr_max_s` from `staleness_corrected.csv` for the
+  paper-reported staleness figures; `avg_staleness_s` in `results_*.csv` is
+  the raw (uncorrected) value.
+- `bronze_lag_s` and `silver_lag_s` for Pipeline A measure *table settlement
+  time* (includes empty end-of-trigger commits from Spark Structured
+  Streaming), not the instant the last data row was written. Pipeline B's
+  equivalent lags reflect data-processing time only.

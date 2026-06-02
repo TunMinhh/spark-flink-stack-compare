@@ -83,7 +83,7 @@ The compose service reads these values from `.env`:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `ICEBERG_CATALOG_URI` | `http://iceberg-rest:8181` | Iceberg REST catalog endpoint inside compose. |
-| `S3_ENDPOINT` | `http://minio:9000` | MinIO endpoint for Iceberg data. |
+| `ICEBERG_WAREHOUSE` | `hdfs://namenode:9000/warehouse/iceberg` | Iceberg warehouse path used by the HDFS-backed catalog. |
 | `ICEBERG_SILVER_NS` | `silver` | Silver namespace. |
 | `ICEBERG_GOLD_NS` | `gold` | Gold namespace. |
 | `MLFLOW_EXPERIMENT` | `intraday-anomaly-detector` | MLflow experiment name. |
@@ -104,3 +104,6 @@ The compose service reads these values from `.env`:
 This model is trained from Silver intraday data, not directly from Kafka. That
 keeps training reproducible while still using data produced by the realtime
 pipeline.
+
+MinIO may still be present in the compose stack for MLflow artifacts, but it is
+not the Iceberg storage backend for Pipeline B.

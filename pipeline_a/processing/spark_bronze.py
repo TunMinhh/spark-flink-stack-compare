@@ -122,6 +122,11 @@ def read_topic_stream(topic: str) -> DataFrame:
 def start_topic_query(topic: str, folder: str):
     return (
         read_topic_stream(topic)
+        # Route each event_date to a single writer so the partitioned append
+        # emits ~1 file per date per micro-batch instead of (tasks x dates)
+        # tiny files, which exploded the single-node HDFS file count. This
+        # mirrors the partition-aware write that Flink's Iceberg sink performs.
+        .repartition("event_date")
         .writeStream.format("delta")
         .outputMode("append")
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/{folder}")

@@ -213,8 +213,11 @@ def output_columns(topic: str) -> list[str]:
 
 def start_query(topic: str):
     df = clean_stream(topic).select(*output_columns(topic))
-    if SILVER_WRITE_COALESCE > 0:
-        df = df.coalesce(SILVER_WRITE_COALESCE)
+    # Partition-aware repartition: send every event_date to a single writer so
+    # the partitioned append produces ~1 file per date per micro-batch.
+    # coalesce() only caps the task count and still sprays one file per date
+    # per task, which exploded the single-node HDFS small-file count.
+    df = df.repartition("event_date")
     return (
         df.writeStream.format("delta")
         .outputMode("append")

@@ -1,4 +1,44 @@
 services:
+  # ===== HDFS =====
+  # Matches Pipeline A's single-node HDFS setup for the Flink/Iceberg/HDFS ablation.
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    environment:
+      - CLUSTER_NAME=basePipeline-cluster
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_replication=1
+      - HDFS_CONF_dfs_namenode_replication_min=1
+      - HDFS_CONF_dfs_namenode_safemode_threshold_pct=0.0
+      - HADOOP_HEAPSIZE=1536
+    ports:
+      - "127.0.0.1:9870:9870"
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    mem_limit: 2g
+    memswap_limit: 2g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "hdfs dfsadmin -safemode get 2>/dev/null | grep -q 'Safe mode is OFF'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_replication=1
+      - HADOOP_HEAPSIZE=2048
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    depends_on:
+      namenode:
+        condition: service_healthy
+    mem_limit: 3g
+    memswap_limit: 3g
+    restart: unless-stopped
+
   # ===== Kafka (KRaft mode, no ZooKeeper) =====
   kafka:
     image: apache/kafka:3.7.0
@@ -51,7 +91,7 @@ services:
     # No healthcheck — latest MinIO image is distroless (no curl/wget).
     # minio-init and iceberg-rest use service_started and retry internally.
 
-  # One-shot: create mlflow + iceberg buckets.
+  # One-shot: create MLflow artifact bucket. Iceberg warehouse is on HDFS.
   minio-init:
     image: minio/mc:latest
     depends_on:
@@ -66,8 +106,7 @@ services:
           echo '[minio-init] waiting for MinIO...' && sleep 2;
         done;
         mc mb --ignore-existing local/mlflow;
-        mc mb --ignore-existing local/iceberg;
-        echo '[minio-init] buckets ready: mlflow, iceberg'
+        echo '[minio-init] bucket ready: mlflow'
       "
     restart: "no"
 
@@ -75,13 +114,8 @@ services:
   iceberg-rest:
     image: tabulario/iceberg-rest:0.10.0
     environment:
-      - CATALOG_WAREHOUSE=s3://iceberg/
-      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
-      - CATALOG_S3_ENDPOINT=http://minio:9000
-      - CATALOG_S3_PATH__STYLE__ACCESS=true
-      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
-      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
-      - AWS_REGION=us-east-1
+      - CATALOG_WAREHOUSE=hdfs://namenode:9000/warehouse/iceberg
+      - CATALOG_IO__IMPL=org.apache.iceberg.hadoop.HadoopFileIO
       # Use PostgreSQL instead of H2 in-memory to avoid concurrent-write conflicts
       - CATALOG_URI=jdbc:postgresql://postgres:5432/iceberg_catalog
       - CATALOG_JDBC_USER=${POSTGRES_USER}
@@ -91,8 +125,8 @@ services:
     depends_on:
       postgres-init:
         condition: service_completed_successfully
-      minio-init:
-        condition: service_completed_successfully
+      namenode:
+        condition: service_healthy
     mem_limit: 1g
     memswap_limit: 1g
     restart: unless-stopped
@@ -108,21 +142,19 @@ services:
     build: ./flink
     command: jobmanager
     environment:
-      ENABLE_BUILT_IN_PLUGINS: flink-s3-fs-hadoop-1.19.3.jar
+      HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         cluster.fine-grained-resource-management.enabled: false
-        s3.endpoint: http://minio:9000
-        s3.access-key: ${MINIO_ROOT_USER}
-        s3.secret-key: ${MINIO_ROOT_PASSWORD}
-        s3.path.style.access: true
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      AWS_REGION: us-east-1
+        fs.default-scheme: hdfs://namenode:9000
+        fs.hdfs.hadoopconf: /opt/hadoop/etc/hadoop
     ports:
       - "127.0.0.1:8082:8081"   # Flink Web UI
     volumes:
       - ./processing:/opt/flink/work-dir
+    depends_on:
+      namenode:
+        condition: service_healthy
     # jobmanager process + REST server + driver overhead
     mem_limit: 2g
     memswap_limit: 2g
@@ -137,7 +169,7 @@ services:
     build: ./flink
     command: taskmanager
     environment:
-      ENABLE_BUILT_IN_PLUGINS: flink-s3-fs-hadoop-1.19.3.jar
+      HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         cluster.fine-grained-resource-management.enabled: false
@@ -153,17 +185,14 @@ services:
         heartbeat.interval: 10000
         # Allow more time for slot acquisition during restart
         slot.request.timeout: 60000
-        s3.endpoint: http://minio:9000
-        s3.access-key: ${MINIO_ROOT_USER}
-        s3.secret-key: ${MINIO_ROOT_PASSWORD}
-        s3.path.style.access: true
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      AWS_REGION: us-east-1
+        fs.default-scheme: hdfs://namenode:9000
+        fs.hdfs.hadoopconf: /opt/hadoop/etc/hadoop
     volumes:
       - ./processing:/opt/flink/work-dir
     depends_on:
       flink-jobmanager:
+        condition: service_healthy
+      namenode:
         condition: service_healthy
     # Engine memory budget is taskmanager.memory.process.size=18432m.
     # The container cap includes runtime headroom, matching Pipeline A's
@@ -256,9 +285,9 @@ services:
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      # Silver and Gold are now Iceberg tables on MinIO; ml_module reads via PyIceberg
+      # Silver and Gold are Iceberg tables in the HDFS warehouse.
       - ICEBERG_CATALOG_URI=http://iceberg-rest:8181
-      - S3_ENDPOINT=http://minio:9000
+      - ICEBERG_WAREHOUSE=hdfs://namenode:9000/warehouse/iceberg
       - ICEBERG_SILVER_NS=silver
       - ICEBERG_GOLD_NS=gold
       - MLFLOW_EXPERIMENT=${MLFLOW_EXPERIMENT:-intraday-anomaly-detector}
@@ -340,6 +369,8 @@ services:
       retries: 5
 
 volumes:
+  namenode_data:
+  datanode_data:
   postgres_data:
   postgres_sink_data:
   kafka_data:

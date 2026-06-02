@@ -1,6 +1,8 @@
 # Pipeline B Benchmark Plan
 
-Pipeline B is benchmarked in intraday-only mode by default. This measures the realtime path:
+Pipeline B is benchmarked in intraday-only mode by default. It now uses the
+same single-node HDFS service profile as Pipeline A for the Iceberg warehouse
+and Flink checkpoints:
 
 ```text
 producer_realtime
@@ -8,6 +10,7 @@ producer_realtime
 -> Bronze heart_rate_intraday / hrv_intraday / breathing_intraday
 -> Silver heart_rate_intraday / hrv_intraday / breathing_intraday
 -> Gold daily_intraday_summary
+-> Iceberg warehouse on hdfs://namenode:9000/warehouse/iceberg
 ```
 
 The Makefile defaults are already set for this path:
@@ -22,7 +25,7 @@ GOLD_ONLY ?= daily_intraday_summary
 ## 1. Start Intraday Pipeline
 
 ```bash
-cd ~/data-pipeline-comparison/pipeline_b
+cd ~/spark-flink-stack-compare/pipeline_b
 git pull
 
 docker compose up -d
@@ -40,6 +43,9 @@ PARALLELISM=6 make gold
 
 By default, Compose starts the realtime ingest/processing stack plus MLflow,
 FastAPI, Postgres sink, and Grafana.
+
+MinIO remains in the Compose stack only for MLflow artifacts; it is no longer
+the Iceberg warehouse used by the benchmark path.
 
 The realtime producer reads shared baseline CSVs from:
 
@@ -82,7 +88,7 @@ Pass criteria:
 ```text
 Bronze rows added > 0
 Silver rows added > 0
-Gold rows added > 0
+Gold refreshed = yes
 benchmark/results_*.csv is created
 ```
 
@@ -91,35 +97,53 @@ benchmark/results_*.csv is created
 Run three request-rate levels, with one warmup run and three measured runs per level:
 
 ```bash
-PYTHONUNBUFFERED=1 \
-REQUEST_RATES=5,10,15,20 \
-N_RUNS=3 \
-WARMUP_RUNS=1 \
-WARMUP_SECS=30 \
-STABLE_MAX_WAIT=300 \
-PARALLELISM=6 \
-bash benchmark/run_benchmark.sh
+for rate in 50 100 200; do
+  echo "===== Flink Iceberg HDFS rate=$rate ====="
+
+  docker compose down -v
+  docker compose up -d
+  sleep 60
+  make init
+
+  PYTHONUNBUFFERED=1 \
+  REQUEST_RATES=$rate \
+  N_RUNS=3 \
+  WARMUP_RUNS=1 \
+  WARMUP_SECS=10 \
+  STABLE_MAX_WAIT=800 \
+  PARALLELISM=6 \
+  bash benchmark/run_benchmark.sh
+
+  echo "===== Done rate=$rate ====="
+done
 ```
 
 Request-rate mapping with default `DELAY=0.1`:
 
-| USERS_PER_TICK | Approx req/s |
+| USERS_PER_TICK | Approx events/s |
 |----------------|--------------|
 | 50 | 1,500 |
-| 500 | 15,000 |
-| 1500 | 45,000 |
+| 100 | 3,000 |
+| 200 | 6,000 |
 
 If time is limited, run one measured run per level first:
 
 ```bash
-PYTHONUNBUFFERED=1 \
-REQUEST_RATES=5,10,15,20 \
-N_RUNS=1 \
-WARMUP_RUNS=1 \
-WARMUP_SECS=30 \
-STABLE_MAX_WAIT=300 \
-PARALLELISM=6 \
-bash benchmark/run_benchmark.sh
+for rate in 50 100 200; do
+  docker compose down -v
+  docker compose up -d
+  sleep 60
+  make init
+
+  PYTHONUNBUFFERED=1 \
+  REQUEST_RATES=$rate \
+  N_RUNS=1 \
+  WARMUP_RUNS=1 \
+  WARMUP_SECS=10 \
+  STABLE_MAX_WAIT=800 \
+  PARALLELISM=6 \
+  bash benchmark/run_benchmark.sh
+done
 ```
 
 ## 4. Result Files
@@ -141,15 +165,18 @@ Useful report metrics:
 ```text
 req_per_sec
 gold_e2e_s
+pipeline_e2e_s
+processing_overhead_s
 first_gold_latency_s
 avg_staleness_s
 max_staleness_s
 bronze_lag_s
 silver_lag_s
 gold_lag_s
-bronze_tps
-silver_tps
-gold_tps
+bronze_throughput_rps
+silver_throughput_rps
+row_integrity_ok
+silver_to_bronze_ratio
 engine_ram_mb
 ```
 

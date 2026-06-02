@@ -11,14 +11,15 @@ KAFKA_BOOTSTRAP := 127.0.0.1:9092
 # Docker container IDs (resolved at runtime)
 C_FLINK    := $(shell docker compose ps -q flink-jobmanager)
 C_KAFKA    := $(shell docker compose ps -q kafka)
+C_NAMENODE := $(shell docker compose ps -q namenode)
 C_FASTAPI  := $(shell docker compose ps -q fastapi)
 C_PGSINK   := $(shell docker compose ps -q postgres-sink)
 C_GRAFANA  := $(shell docker compose ps -q grafana)
 C_MINIO    := $(shell docker compose ps -q minio)
 
-# Iceberg + S3 config (all Flink jobs read these from env)
+# Iceberg + HDFS config (all Flink jobs read these from env)
 ICEBERG_CATALOG_URI := http://iceberg-rest:8181
-S3_ENDPOINT         := http://minio:9000
+ICEBERG_WAREHOUSE   := hdfs://namenode:9000/warehouse/iceberg
 MINIO_USER          ?= minioadmin
 MINIO_PASS          ?= minioadmin123
 PG_SINK_DB          ?= wellness
@@ -64,7 +65,7 @@ FLINK_MINI_BATCH_SIZE ?= 5000
 # =============================================================================
 
 .PHONY: \
-	init init-kafka init-iceberg \
+	init init-hdfs init-kafka init-iceberg \
 	producer-realtime \
 	bronze silver gold export-gold \
 	cancel-bronze cancel-silver cancel-gold cancel-all \
@@ -80,7 +81,15 @@ FLINK_MINI_BATCH_SIZE ?= 5000
 # INIT
 # =============================================================================
 
-init: init-kafka init-iceberg
+init: init-hdfs init-kafka init-iceberg
+
+init-hdfs:
+	docker exec $(C_NAMENODE) hdfs dfs -mkdir -p /warehouse/iceberg
+	docker exec $(C_NAMENODE) hdfs dfs -mkdir -p /checkpoints/flink/bronze
+	docker exec $(C_NAMENODE) hdfs dfs -mkdir -p /checkpoints/flink/silver
+	docker exec $(C_NAMENODE) hdfs dfs -mkdir -p /checkpoints/flink/gold
+	docker exec $(C_NAMENODE) hdfs dfs -chmod -R 777 /warehouse /checkpoints
+	@echo "[init-hdfs] HDFS warehouse/checkpoints ready"
 
 init-kafka:
 	docker exec $(C_KAFKA) bash -lc '\
@@ -129,10 +138,7 @@ producer-realtime:
 define FLINK_ENV
 	KAFKA_BOOTSTRAP=kafka:19092 \
 	ICEBERG_CATALOG_URI=$(ICEBERG_CATALOG_URI) \
-	S3_ENDPOINT=$(S3_ENDPOINT) \
-	AWS_ACCESS_KEY_ID=$(MINIO_USER) \
-	AWS_SECRET_ACCESS_KEY=$(MINIO_PASS) \
-	AWS_REGION=us-east-1 \
+	ICEBERG_WAREHOUSE=$(ICEBERG_WAREHOUSE) \
 	PARALLELISM=$(PARALLELISM) \
 	ICEBERG_MONITOR_INTERVAL="$(ICEBERG_MONITOR_INTERVAL)" \
 	FLINK_CHECKPOINT_INTERVAL="$(FLINK_CHECKPOINT_INTERVAL)" \
@@ -143,14 +149,11 @@ endef
 
 # Bronze — TRUE STREAMING: Kafka → Iceberg Bronze
 # Submitted detached (-d). Job runs forever on the Flink cluster until cancelled.
-bronze: init-kafka init-iceberg
+bronze: init-hdfs init-kafka init-iceberg
 	docker exec \
 		-e KAFKA_BOOTSTRAP=kafka:19092 \
 		-e ICEBERG_CATALOG_URI=$(ICEBERG_CATALOG_URI) \
-		-e S3_ENDPOINT=$(S3_ENDPOINT) \
-		-e AWS_ACCESS_KEY_ID=$(MINIO_USER) \
-		-e AWS_SECRET_ACCESS_KEY=$(MINIO_PASS) \
-		-e AWS_REGION=us-east-1 \
+		-e ICEBERG_WAREHOUSE=$(ICEBERG_WAREHOUSE) \
 		-e PARALLELISM=$(PARALLELISM) \
 		-e FLINK_CHECKPOINT_INTERVAL="$(FLINK_CHECKPOINT_INTERVAL)" \
 		-e FLINK_CHECKPOINT_INTERVAL_SECONDS="$(FLINK_CHECKPOINT_INTERVAL_SECONDS)" \
@@ -162,10 +165,7 @@ bronze: init-kafka init-iceberg
 silver:
 	docker exec \
 		-e ICEBERG_CATALOG_URI=$(ICEBERG_CATALOG_URI) \
-		-e S3_ENDPOINT=$(S3_ENDPOINT) \
-		-e AWS_ACCESS_KEY_ID=$(MINIO_USER) \
-		-e AWS_SECRET_ACCESS_KEY=$(MINIO_PASS) \
-		-e AWS_REGION=us-east-1 \
+		-e ICEBERG_WAREHOUSE=$(ICEBERG_WAREHOUSE) \
 		-e PARALLELISM=$(PARALLELISM) \
 		-e ICEBERG_MONITOR_INTERVAL="$(ICEBERG_MONITOR_INTERVAL)" \
 		-e FLINK_CHECKPOINT_INTERVAL="$(FLINK_CHECKPOINT_INTERVAL)" \
@@ -178,10 +178,7 @@ silver:
 gold:
 	docker exec \
 		-e ICEBERG_CATALOG_URI=$(ICEBERG_CATALOG_URI) \
-		-e S3_ENDPOINT=$(S3_ENDPOINT) \
-		-e AWS_ACCESS_KEY_ID=$(MINIO_USER) \
-		-e AWS_SECRET_ACCESS_KEY=$(MINIO_PASS) \
-		-e AWS_REGION=us-east-1 \
+		-e ICEBERG_WAREHOUSE=$(ICEBERG_WAREHOUSE) \
 		-e PARALLELISM=$(PARALLELISM) \
 		-e ICEBERG_MONITOR_INTERVAL="$(ICEBERG_MONITOR_INTERVAL)" \
 		-e FLINK_CHECKPOINT_INTERVAL="$(FLINK_CHECKPOINT_INTERVAL)" \
@@ -226,10 +223,7 @@ _cancel-by-name:
 export-gold:
 	docker exec \
 		-e ICEBERG_CATALOG_URI=$(ICEBERG_CATALOG_URI) \
-		-e S3_ENDPOINT=$(S3_ENDPOINT) \
-		-e AWS_ACCESS_KEY_ID=$(MINIO_USER) \
-		-e AWS_SECRET_ACCESS_KEY=$(MINIO_PASS) \
-		-e AWS_REGION=us-east-1 \
+		-e ICEBERG_WAREHOUSE=$(ICEBERG_WAREHOUSE) \
 		-e PG_SINK_HOST=postgres-sink \
 		-e PG_SINK_PORT=5432 \
 		-e PG_SINK_DB=${PG_SINK_DB} \
@@ -288,7 +282,7 @@ train-ai:
 	@curl -sf -X POST http://localhost:8000/train | python3 -m json.tool
 
 build-flink:
-	docker compose build flink-jobmanager flink-taskmanage
+	docker compose build flink-jobmanager flink-taskmanager
 
 # =============================================================================
 # RESET
@@ -309,6 +303,9 @@ reset:
 				echo "[reset] dropped $$ns.$$tbl" || true; \
 		done; \
 	done
+	@echo "[reset] clearing HDFS Iceberg warehouse and Flink checkpoints..."
+	-docker exec $(C_NAMENODE) hdfs dfs -rm -r -skipTrash /warehouse/iceberg/* /checkpoints/flink/* >/dev/null 2>&1 || true
+	@$(MAKE) init-hdfs
 
 reset-silver:
 	@tables=$$(curl -sf "http://localhost:8181/v1/namespaces/silver/tables" \

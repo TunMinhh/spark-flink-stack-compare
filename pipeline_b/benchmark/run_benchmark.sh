@@ -10,13 +10,13 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
 echo "============================================================"
-echo "  Pipeline B Benchmark (Flink + Iceberg)"
+echo "  Pipeline B Benchmark (Flink + Iceberg + HDFS)"
 echo "  $(date)"
 echo "============================================================"
 
 # ── 1. Verify required containers are running ────────────────────────────────
 echo "[check] Verifying required containers..."
-for svc in flink-jobmanager flink-taskmanager kafka iceberg-rest minio; do
+for svc in flink-jobmanager flink-taskmanager kafka iceberg-rest namenode datanode; do
   id=$(docker compose ps -q "$svc" 2>/dev/null || true)
   if [ -z "$id" ]; then
     echo "[ERROR] $svc is not running. Run: docker compose up -d"
@@ -46,6 +46,9 @@ topic_count=$(docker exec "$C_KAFKA" bash -lc \
 echo "  ✓ $topic_count Kafka topics"
 
 # ── 4. Verify Iceberg namespaces ─────────────────────────────────────────────
+echo "[init] Ensuring HDFS warehouse/checkpoints exist..."
+make init-hdfs
+
 echo "[check] Verifying Iceberg namespaces..."
 ns_count=$(curl -sf "http://localhost:8181/v1/namespaces" \
   | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('namespaces',[])))" 2>/dev/null || echo 0)

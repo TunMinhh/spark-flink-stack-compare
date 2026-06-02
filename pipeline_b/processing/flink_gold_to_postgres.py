@@ -14,9 +14,7 @@ import sys
 from pyflink.table import EnvironmentSettings, TableEnvironment
 
 ICEBERG_URI = os.environ["ICEBERG_CATALOG_URI"]
-S3_ENDPOINT = os.environ["S3_ENDPOINT"]
-AWS_KEY     = os.environ["AWS_ACCESS_KEY_ID"]
-AWS_SECRET  = os.environ["AWS_SECRET_ACCESS_KEY"]
+ICEBERG_WAREHOUSE = os.environ.get("ICEBERG_WAREHOUSE", "hdfs://namenode:9000/warehouse/iceberg")
 PARALLELISM = int(os.environ.get("PARALLELISM", "2"))
 
 PG_HOST = os.environ.get("PG_SINK_HOST", "postgres-sink")
@@ -32,10 +30,8 @@ t_env = TableEnvironment.create(
 t_env.get_config().set("parallelism.default", str(PARALLELISM))
 
 cfg = t_env.get_config().get_configuration()
-cfg.set_string("s3.endpoint", S3_ENDPOINT)
-cfg.set_string("s3.path-style-access", "true")
-cfg.set_string("s3.access-key", AWS_KEY)
-cfg.set_string("s3.secret-key", AWS_SECRET)
+cfg.set_string("fs.default-scheme", "hdfs://namenode:9000")
+cfg.set_string("fs.hdfs.hadoopconf", "/opt/hadoop/etc/hadoop")
 
 if "iceberg_cat" not in t_env.list_catalogs():
     t_env.execute_sql(f"""
@@ -43,10 +39,8 @@ if "iceberg_cat" not in t_env.list_catalogs():
             'type'                 = 'iceberg',
             'catalog-type'         = 'rest',
             'uri'                  = '{ICEBERG_URI}',
-            'io-impl'              = 'org.apache.iceberg.aws.s3.S3FileIO',
-            's3.endpoint'          = '{S3_ENDPOINT}',
-            's3.path-style-access' = 'true',
-            'warehouse'            = 's3://iceberg/'
+            'io-impl'              = 'org.apache.iceberg.hadoop.HadoopFileIO',
+            'warehouse'            = '{ICEBERG_WAREHOUSE}'
         )
     """)
 

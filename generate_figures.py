@@ -62,24 +62,94 @@ def extract(files, key):
     return result
 
 
+def extract_gold_ready_e2e(files):
+    """Returns {rate: (mean, std)} for Gold-ready E2E = producer_stop_s + gold_lag_s."""
+    result = {}
+    for rate, path in files.items():
+        rows = load_measured(path)
+        vals = [
+            float(r["producer_stop_s"]) + float(r["gold_lag_s"])
+            for r in rows
+            if r.get("producer_stop_s", "") not in ("", "-1.0", "-1")
+            and r.get("gold_lag_s", "") not in ("", "-1.0", "-1")
+        ]
+        result[rate] = (mean(vals), std(vals))
+    return result
+
+
 def load_corrected_staleness():
-    """Load post-first-Gold corrected staleness from staleness_corrected.csv.
+    """Load post-first-Gold corrected staleness.
+    - Spark : from staleness_corrected.csv  (pre-computed corr_avg_s)
+    - Flink : computed inline from flink_result staleness + result CSVs
     Returns {pipeline_name: {rate: (mean_corr_avg, std_corr_avg)}}.
     """
-    path = BASE / "staleness_corrected.csv"
-    data = {"spark": {}, "flink": {}}
-    # Collect per-run corr_avg_s grouped by (pipeline, rate)
-    groups: dict[tuple, list[float]] = {}
     upt_to_rate = {50: 1500, 100: 3000, 200: 6000}
-    with open(path, newline="") as f:
+    data = {"spark": {}, "flink": {}}
+    groups: dict[tuple, list[float]] = {}
+
+    # ── Spark: read from staleness_corrected.csv ─────────────────────────────
+    corr_path = BASE / "staleness_corrected.csv"
+    with open(corr_path, newline="") as f:
         for row in csv.DictReader(f):
             if row["is_warmup"].strip().lower() in ("true", "1"):
                 continue
-            pipeline = row["pipeline"]          # "spark" or "flink"
-            upt      = int(row["rate"])          # users_per_tick: 50/100/200
-            rate     = upt_to_rate.get(upt, upt) # map to events/s: 1500/3000/6000
-            key = (pipeline, rate)
-            groups.setdefault(key, []).append(float(row["corr_avg_s"]))
+            upt  = int(row["rate"])
+            rate = upt_to_rate.get(upt, upt)
+            groups.setdefault(("spark", rate), []).append(float(row["corr_avg_s"]))
+
+    # ── Flink: compute inline from raw staleness + result CSVs ───────────────
+    flink_result_files = {
+        1500: BASE / "flink_result/50_result.csv",
+        3000: BASE / "flink_result/100_result.csv",
+        6000: BASE / "flink_result/200_result.csv",
+    }
+    flink_staleness_files = {
+        1500: BASE / "flink_result/50_staleness.csv",
+        3000: BASE / "flink_result/100_staleness.csv",
+        6000: BASE / "flink_result/200_staleness.csv",
+    }
+    for rate in RATES:
+        stal_path = flink_staleness_files[rate]
+        res_path  = flink_result_files[rate]
+        if stal_path.exists():
+            # Build {run_label: first_gold_latency_s} from result CSV
+            first_gold: dict[str, float] = {}
+            with open(res_path, newline="") as f:
+                for row in csv.DictReader(f):
+                    if row["is_warmup"].strip().lower() in ("true", "1"):
+                        continue
+                    lbl = f"{row['pipeline']}_rate{row['req_per_sec']}_run{row['run']}"
+                    try:
+                        first_gold[lbl] = float(row["first_gold_latency_s"])
+                    except (ValueError, KeyError):
+                        first_gold[lbl] = 0.0
+            # Filter post-first-gold, compute corrected avg per run
+            run_samples: dict[str, list[float]] = {}
+            with open(stal_path, newline="") as f:
+                for row in csv.DictReader(f):
+                    if row["is_warmup"].strip().lower() in ("true", "1"):
+                        continue
+                    lbl = row["run_label"]
+                    fg  = first_gold.get(lbl, 0.0)
+                    if float(row["wall_s"]) >= fg:
+                        run_samples.setdefault(lbl, []).append(float(row["staleness_s"]))
+            for lbl, vals in run_samples.items():
+                if vals:
+                    groups.setdefault(("flink", rate), []).append(mean(vals))
+        else:
+            # Fallback: use avg_staleness_s from result CSV directly
+            with open(res_path, newline="") as f:
+                for row in csv.DictReader(f):
+                    if row["is_warmup"].strip().lower() in ("true", "1"):
+                        continue
+                    try:
+                        groups.setdefault(("flink", rate), []).append(
+                            float(row["avg_staleness_s"])
+                        )
+                    except (ValueError, KeyError):
+                        pass
+
+    # ── Aggregate runs → (mean, std) per pipeline+rate ───────────────────────
     for (pipeline, rate), vals in groups.items():
         if pipeline in data:
             data[pipeline][rate] = (mean(vals), std(vals))
@@ -92,7 +162,7 @@ corrected_staleness = load_corrected_staleness()
 metrics = {}
 for label, files in [("flink", FLINK_FILES), ("spark", SPARK_FILES)]:
     metrics[label] = {
-        "e2e":        extract(files, "gold_e2e_s"),
+        "e2e":        extract_gold_ready_e2e(files),
         "staleness":  corrected_staleness[label],   # corrected post-first-Gold
         "bronze_lag": extract(files, "bronze_lag_s"),
         "silver_lag": extract(files, "silver_lag_s"),
@@ -114,7 +184,7 @@ plt.rcParams.update({
     "axes.labelsize":   13,
     "xtick.labelsize":  12,
     "ytick.labelsize":  12,
-    "legend.fontsize":  12,
+    "legend.fontsize":  11,
     "figure.dpi":       200,
 })
 
@@ -135,6 +205,8 @@ def _draw_bar_chart(ax, met_key, title, ylabel, show_legend=True, footnote=None)
     spark_means = [metrics["spark"][met_key][r][0] for r in RATES]
     spark_stds  = [metrics["spark"][met_key][r][1] for r in RATES]
 
+    max_val = max(spark_means)
+
     bars_f = ax.bar(
         x - offset, flink_means, width,
         yerr=flink_stds, capsize=4,
@@ -152,23 +224,32 @@ def _draw_bar_chart(ax, met_key, title, ylabel, show_legend=True, footnote=None)
         zorder=3,
     )
 
-    # Value labels on Flink bars
+    # Flink: value label just above bar (blue bold)
     for bar, val in zip(bars_f, flink_means):
         ax.text(
             bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + max(spark_means) * 0.01,
+            bar.get_height() + max_val * 0.012,
             f"{val:.0f}s",
-            ha="center", va="bottom", fontsize=8, color=COL_FLINK, fontweight="bold",
+            ha="center", va="bottom", fontsize=9, color=COL_FLINK, fontweight="bold",
         )
 
-    # Ratio annotations above Spark bars
+    # Spark: value label centered inside bar (white bold) + ratio above bar
     for sm, fm, se, bar in zip(spark_means, flink_means, spark_stds, bars_s):
         ratio = sm / fm if fm > 0 else 0
+        # Value inside bar
         ax.text(
             bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + se + max(spark_means) * 0.02,
+            bar.get_height() * 0.50,
+            f"{sm:.0f}s",
+            ha="center", va="center", fontsize=9, color="white", fontweight="bold",
+            zorder=4,
+        )
+        # Ratio above bar top + error bar clearance
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + se + max_val * 0.035,
             f"{ratio:.1f}×",
-            ha="center", va="bottom", fontsize=8.5, color="black", style="italic",
+            ha="center", va="bottom", fontsize=9, color="black", style="italic",
         )
 
     ax.set_xticks(x)
@@ -176,13 +257,15 @@ def _draw_bar_chart(ax, met_key, title, ylabel, show_legend=True, footnote=None)
     ax.set_xlabel("Offered rate (events/s)")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    ax.set_ylim(0, max(spark_means) * 1.30)
+    ax.set_ylim(0, max_val * 1.55)
     ax.yaxis.grid(True, linestyle="--", alpha=0.5, zorder=0)
     ax.set_axisbelow(True)
     ax.spines[["top", "right"]].set_visible(False)
 
     if show_legend:
-        ax.legend(loc="upper left", framealpha=0.9)
+        # upper right: Spark bars (left/center) won't conflict; Flink bars are short
+        ax.legend(loc="upper right", framealpha=0.95, fontsize=10,
+                  handlelength=1.4, handleheight=0.9, borderpad=0.6)
 
     if footnote:
         ax.annotate(
@@ -198,16 +281,16 @@ def _draw_bar_chart(ax, met_key, title, ylabel, show_legend=True, footnote=None)
 fig1, ax1 = plt.subplots(figsize=(7, 5.5))
 _draw_bar_chart(
     ax1, "e2e",
-    title="End-to-End Latency",
+    title="End-to-End Gold-Ready Latency",
     ylabel="Latency (s)",
     show_legend=True,
 )
 fig1.suptitle(
-    "Figure 1. End-to-end latency across three load levels.\n"
-    "Error bars = SD of 3 measured runs. Ratios (italic) = Spark ÷ Flink.",
-    fontsize=9.5, y=0.01, va="bottom",
+    "Figure 1. Gold-ready E2E latency = producer_stop + gold_lag, across three load levels.\n"
+    "Error bars = SD of 3 measured runs. Values inside/above bars. Ratios (italic) = Spark ÷ Flink.",
+    fontsize=9, y=0.01, va="bottom",
 )
-fig1.tight_layout(rect=[0, 0.07, 1, 1])
+fig1.tight_layout(rect=[0, 0.08, 1, 1])
 out1 = OUTDIR / "fig1_e2e_latency.png"
 fig1.savefig(out1, bbox_inches="tight")
 print(f"Saved {out1}")
@@ -226,10 +309,10 @@ _draw_bar_chart(
 )
 fig1b.suptitle(
     "Figure 2. Average Gold staleness across three load levels.\n"
-    "Error bars = SD of 3 measured runs. Ratios (italic) = Spark ÷ Flink.",
-    fontsize=9.5, y=0.01, va="bottom",
+    "Error bars = SD of 3 measured runs. Values inside/above bars. Ratios (italic) = Spark ÷ Flink.",
+    fontsize=9, y=0.01, va="bottom",
 )
-fig1b.tight_layout(rect=[0, 0.07, 1, 1])
+fig1b.tight_layout(rect=[0, 0.08, 1, 1])
 out1b = OUTDIR / "fig1b_staleness.png"
 fig1b.savefig(out1b, bbox_inches="tight")
 print(f"Saved {out1b}")
@@ -241,9 +324,7 @@ print(f"Saved {out1b}")
 LAYERS     = ["Bronze", "Silver", "Gold"]
 LAG_KEYS   = ["bronze_lag", "silver_lag", "gold_lag"]
 
-# Layout: 3 rate columns, each column shows Bronze/Silver/Gold bars (Flink vs Spark)
 fig2, axes2 = plt.subplots(1, 3, figsize=(16, 5.5), sharey=False)
-fig2.subplots_adjust(wspace=0.28)
 
 LAYER_COLORS_F = ["#4393c3", "#2166ac", "#053061"]   # blue shades (Bronze→Silver→Gold)
 LAYER_COLORS_S = ["#f4a582", "#d6604d", "#67001f"]   # red shades
@@ -251,66 +332,79 @@ LAYER_COLORS_S = ["#f4a582", "#d6604d", "#67001f"]   # red shades
 for col_idx, rate in enumerate(RATES):
     ax = axes2[col_idx]
 
-    x     = np.arange(len(LAYERS))
-    width = 0.30
+    x      = np.arange(len(LAYERS))
+    width  = 0.30
     offset = 0.17
 
     flink_vals = [metrics["flink"][k][rate][0] for k in LAG_KEYS]
     spark_vals = [metrics["spark"][k][rate][0] for k in LAG_KEYS]
+    max_sv = max(spark_vals)
 
     bars_f = ax.bar(
         x - offset, flink_vals, width,
         color=LAYER_COLORS_F, edgecolor="black", linewidth=0.7,
-        label="Flink+Iceberg", zorder=3,
+        zorder=3,
     )
     bars_s = ax.bar(
         x + offset, spark_vals, width,
         color=LAYER_COLORS_S, hatch="///", edgecolor="black", linewidth=0.7,
-        label="Spark+Delta Lake", zorder=3,
+        zorder=3,
     )
 
-    # Ratio labels above Spark bars (Bronze and Silver only — Gold is similar)
-    for i, (sv, fv) in enumerate(zip(spark_vals, flink_vals)):
-        bar = bars_s[i]
-        if i < 2:  # Bronze and Silver
-            ratio = sv / fv if fv > 0 else 0
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + max(spark_vals) * 0.02,
-                f"{ratio:.1f}×",
-                ha="center", va="bottom", fontsize=8.5, style="italic",
-            )
-        # Flink value labels
-        bar_f = bars_f[i]
+    # Flink: value label just above bar
+    for fv, bar_f in zip(flink_vals, bars_f):
         ax.text(
             bar_f.get_x() + bar_f.get_width() / 2,
-            bar_f.get_height() + max(spark_vals) * 0.01,
+            bar_f.get_height() + max_sv * 0.012,
             f"{fv:.0f}s",
-            ha="center", va="bottom", fontsize=7.5, color="#053061", fontweight="bold",
+            ha="center", va="bottom", fontsize=8, color="#053061", fontweight="bold",
+        )
+
+    # Spark: value inside bar (white bold) + ratio above bar for all three layers
+    for i, (sv, fv, bar_s) in enumerate(zip(spark_vals, flink_vals, bars_s)):
+        ratio = sv / fv if fv > 0 else 0
+        # Value centered inside Spark bar
+        ax.text(
+            bar_s.get_x() + bar_s.get_width() / 2,
+            bar_s.get_height() * 0.50,
+            f"{sv:.0f}s",
+            ha="center", va="center", fontsize=8, color="white", fontweight="bold",
+            zorder=4,
+        )
+        # Ratio annotation above bar
+        ax.text(
+            bar_s.get_x() + bar_s.get_width() / 2,
+            bar_s.get_height() + max_sv * 0.03,
+            f"{ratio:.1f}×",
+            ha="center", va="bottom", fontsize=8.5, style="italic",
         )
 
     ax.set_xticks(x)
     ax.set_xticklabels(LAYERS)
     ax.set_title(f"{rate:,} events/s")
     ax.set_ylabel("Catch-up lag (s)" if col_idx == 0 else "")
-    ax.set_ylim(0, max(spark_vals) * 1.30)
+    ax.set_ylim(0, max_sv * 1.50)
     ax.yaxis.grid(True, linestyle="--", alpha=0.5, zorder=0)
     ax.set_axisbelow(True)
     ax.spines[["top", "right"]].set_visible(False)
 
-    if col_idx == 0:
-        legend_handles = [
-            mpatches.Patch(facecolor=COL_FLINK, edgecolor="black", label="Pipeline B (Flink+Iceberg)"),
-            mpatches.Patch(facecolor=COL_SPARK, edgecolor="black", hatch="///", label="Pipeline A (Spark+Delta Lake)"),
-        ]
-        ax.legend(handles=legend_handles, loc="upper right", framealpha=0.9, fontsize=9)
+# Shared legend above all subplots (fig-level, avoids any ax overlap)
+_leg_handles = [
+    mpatches.Patch(facecolor=COL_FLINK, edgecolor="black",
+                   label="Pipeline B (Flink+Iceberg)"),
+    mpatches.Patch(facecolor=COL_SPARK, edgecolor="black", hatch="///",
+                   label="Pipeline A (Spark+Delta Lake)"),
+]
+fig2.legend(handles=_leg_handles, loc="upper center", ncol=2,
+            bbox_to_anchor=(0.5, 1.0), fontsize=10, framealpha=0.95,
+            handlelength=1.4, handleheight=0.9)
 
 fig2.suptitle(
     "Figure 2. Per-layer catch-up lag (Bronze, Silver, Gold) after the producer stops.\n"
-    "Ratios (italic) above Spark bars = Spark ÷ Flink. Numbers above Flink bars = absolute lag.",
+    "Values inside Spark bars and above Flink bars. Ratios (italic) = Spark ÷ Flink.",
     fontsize=9.5, y=0.01, va="bottom",
 )
-fig2.tight_layout(rect=[0, 0.07, 1, 1])
+fig2.tight_layout(rect=[0, 0.08, 1, 0.91])
 out2 = OUTDIR / "fig2_layer_lag.png"
 fig2.savefig(out2, bbox_inches="tight")
 print(f"Saved {out2}")

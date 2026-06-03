@@ -7,13 +7,27 @@ Bronze, Silver, and Gold are expected to run continuously:
 The benchmark emits intraday events, then observes Delta commit timestamps and
 row deltas to measure freshness, catch-up lag, throughput, and memory.
 
-Measurement methodology (v2):
-  Stabilisation polling uses latest_delta_ts_ms() which reads at most 1-2 log
-  files per table (scans backwards from the latest, stops at the first file
-  with a real commitInfo.timestamp).  This is O(1) in log-file count regardless
-  of how many commits have accumulated.  Empty txn-only commits written by
-  Spark between triggers have no commitInfo.timestamp and are transparently
-  skipped.
+Measurement methodology (v3):
+  Bronze/Silver catch-up lag counts *data-bearing commits only*.  Stabilisation
+  for these layers uses latest_data_delta_ts_ms(), which returns the timestamp
+  of the most recent commit that contains an `add` action (real data files).
+  Empty end-of-trigger commits written by Spark Structured Streaming (a fresh
+  commitInfo.timestamp but no `add` actions) are skipped entirely: once the last
+  data commit has landed the layer is treated as settled, no matter how many
+  empty commits follow.  Bronze/Silver lag therefore reflects the time of the
+  last real data write — matching the Gold tracker — instead of table-settlement
+  time.  Iceberg never emits empty snapshots, so Pipeline B is unaffected and
+  the two pipelines become directly comparable.
+
+  Gold still uses latest_delta_ts_ms() (data + add modificationTime); its
+  commits are driven by genuine aggregation state changes, so its freshness and
+  lag are unchanged.
+
+  Both timestamp scans read at most 1-2 log files per table in the common case
+  (scan backwards from the latest, stop at the first qualifying commit), O(1) in
+  log-file count regardless of how many commits have accumulated.  Txn-only
+  start-of-trigger commits (no commitInfo.timestamp, no add) carry no observable
+  timestamp and are always skipped.
 
   Row counts are called exactly twice per run: once at baseline (before the
   producer starts) and once after the timestamp-based stabilisation fires.
@@ -142,6 +156,54 @@ def latest_delta_ts_ms_many(table_paths: list[str]) -> dict[str, int]:
     return {p: latest_delta_ts_ms(p) for p in table_paths}
 
 
+def latest_data_delta_ts_ms(table_path: str) -> int:
+    """Return the commit timestamp of the most recent *data-bearing* commit.
+
+    A data-bearing commit is a Delta log entry that contains at least one ``add``
+    action — i.e. new data files were actually written.  Empty end-of-trigger
+    commits produced by Spark Structured Streaming (a fresh ``commitInfo.timestamp``
+    but **no** ``add`` actions) are skipped entirely.
+
+    Rationale: from a catch-up-lag perspective an empty commit carries no new
+    data, so the table should be considered *settled* the moment its last data
+    commit lands — regardless of how many empty commits Spark writes afterwards.
+    This makes Bronze/Silver lag measure the time of the last real data write
+    (the same definition the Gold tracker already uses) instead of table-
+    settlement time.  Iceberg never emits empty snapshots, so Pipeline B is
+    unaffected and the two pipelines become directly comparable.
+
+    Scans backwards from the newest log file and returns the timestamp of the
+    first commit that contains an ``add`` action (``commitInfo.timestamp``
+    preferred, ``add.modificationTime`` as fallback).  Returns 0 if none found.
+    """
+    # Tolerate a run's worth of trailing empty commits stacked on top of the
+    # last data commit (≈1 empty commit / trigger).  Normally stops at file 1-2.
+    MAX_TAIL_READS = 40
+    logs = delta_json_logs(table_path)
+    if not logs:
+        return 0
+    for log in reversed(logs[-MAX_TAIL_READS:]):
+        actions   = _read_json_lines(log)
+        has_add   = any("add" in a for a in actions)
+        if not has_add:
+            continue  # empty / metadata-only commit → not data, keep scanning back
+        commit_ts = 0
+        add_ts    = 0
+        for action in actions:
+            if "commitInfo" in action:
+                commit_ts = max(commit_ts, int(action["commitInfo"].get("timestamp", 0) or 0))
+            if "add" in action:
+                add_ts = max(add_ts, int(action["add"].get("modificationTime", 0) or 0))
+        ts = commit_ts or add_ts
+        if ts > 0:
+            return ts
+    return 0
+
+
+def latest_data_delta_ts_ms_many(table_paths: list[str]) -> dict[str, int]:
+    return {p: latest_data_delta_ts_ms(p) for p in table_paths}
+
+
 # Cache: table_path -> (last_scanned_log_idx, {parquet_path: row_count})
 # Incremental: each call only reads log files with index > last_scanned_log_idx,
 # reducing per-call cost from O(all log files) to O(new log files since last call).
@@ -233,33 +295,44 @@ def wait_for_stable_many(
     table_paths: list[str],
     baseline_ts: dict[str, int],
     label: str,
+    t0: float,
+    ts_fn=latest_delta_ts_ms_many,
 ) -> tuple[float, int, bool]:
-    """Block until every table has a new commit timestamp and all stop moving
-    simultaneously.  Both real-data commits and empty end-of-trigger commits
-    are counted, so the layer is declared stable only when Spark's streaming
-    engine stops touching ALL tables — the correct consumer-facing settlement
-    point.  O(1-2 files) per table per poll.
+    """Block until every table has a NEW commit (per ``ts_fn``) and all of them
+    stop moving for STABLE_POLLS_REQUIRED consecutive polls, then return the
+    wall-clock offset (relative to ``t0``) at which the most recent new commit
+    was observed — not the time the confirmation window ended.
+
+    For Bronze and Silver we pass ``ts_fn=latest_data_delta_ts_ms_many`` so that
+    only *data-bearing* commits advance the timestamp.  Empty end-of-trigger
+    commits carry no ``add`` actions and are therefore invisible here: once the
+    last data commit has landed, the layer is treated as settled no matter how
+    many empty commits Spark writes afterwards.  The returned settlement time
+    thus reflects the last real data write — the same semantics the Gold
+    tracker uses — instead of table-settlement time.  O(1-2 files) per table
+    per poll in the common case.
     """
-    start       = time.time()
+    start            = time.time()
     last_ts_map: dict[str, int] = {}
-    stable_n    = 0
+    last_commit_wall = round(start - t0, 2)   # fallback if no new commit is seen
+    stable_n         = 0
     while time.time() - start < STABLE_MAX_WAIT:
-        current = latest_delta_ts_ms_many(table_paths)
+        current = ts_fn(table_paths)
         all_new = all(current[p] > baseline_ts[p] for p in table_paths)
         if all_new:
             if current == last_ts_map:
                 stable_n += 1
                 if stable_n >= STABLE_POLLS_REQUIRED:
-                    waited   = round(time.time() - start, 2)
-                    final_ts = min(current.values())
-                    print(f"    [stable] {label} → {waited}s")
-                    return waited, final_ts, True
+                    print(f"    [stable] {label} → last data commit at {last_commit_wall}s")
+                    return last_commit_wall, min(current.values()), True
             else:
-                last_ts_map = dict(current)
-                stable_n    = 0
+                # A new (data) commit appeared — record when we observed it.
+                last_ts_map      = dict(current)
+                last_commit_wall = round(time.time() - t0, 2)
+                stable_n         = 0
         time.sleep(STABLE_POLL_SECS)
     print(f"    [TIMEOUT] {label} did not stabilise within {STABLE_MAX_WAIT}s")
-    return float(STABLE_MAX_WAIT), min(last_ts_map.values()) if last_ts_map else 0, False
+    return last_commit_wall, (min(last_ts_map.values()) if last_ts_map else 0), False
 
 
 # ── Staleness monitor (uses latest_delta_ts_ms — O(1-2 files) per sample) ───
@@ -434,8 +507,10 @@ def run_once(
     print(f"{'=' * 70}")
 
     # ── Baselines — O(1-2 files) timestamp + O(n) row count, each done once ──
-    base_b_ts = latest_delta_ts_ms_many(BRONZE_WATCH_TABLES)
-    base_s_ts = latest_delta_ts_ms_many(SILVER_WATCH_TABLES)
+    # Bronze/Silver track *data-bearing* commits only (empty end-of-trigger
+    # commits are ignored), so use the data-only timestamp for their baselines.
+    base_b_ts = latest_data_delta_ts_ms_many(BRONZE_WATCH_TABLES)
+    base_s_ts = latest_data_delta_ts_ms_many(SILVER_WATCH_TABLES)
     base_g_ts = latest_delta_ts_ms(GOLD_WATCH)
 
     base_b_rows_by_table = delta_row_count_by_table(BRONZE_WATCH_TABLES)
@@ -471,8 +546,8 @@ def run_once(
         wait_results: dict[str, tuple[float, bool]] = {}
 
         def wait_layer(name: str, fn) -> None:
-            *_, ok = fn()
-            wait_results[name] = (round(time.time() - t0, 2), ok)
+            commit_wall, _final_ts, ok = fn()
+            wait_results[name] = (commit_wall, ok)
 
         # Gold commit tracker — O(1-2 files), skips empty txn-only commits
         gold_last_commit_wall: list[float] = []
@@ -495,14 +570,17 @@ def run_once(
         gold_tracker = threading.Thread(target=_track_gold_commits, daemon=True)
         gold_tracker.start()
 
-        # Bronze and Silver run in parallel — independent ingest paths
+        # Bronze and Silver run in parallel — independent ingest paths.
+        # Both watch *data-bearing* commits only: empty end-of-trigger commits
+        # are ignored, so the layer settles at its last real data write.
         bs_threads = [
             threading.Thread(
                 target=wait_layer,
                 args=(
                     "bronze",
                     lambda: wait_for_stable_many(
-                        BRONZE_WATCH_TABLES, base_b_ts, "Bronze"
+                        BRONZE_WATCH_TABLES, base_b_ts, "Bronze",
+                        t0, latest_data_delta_ts_ms_many,
                     ),
                 ),
                 daemon=True,
@@ -512,7 +590,8 @@ def run_once(
                 args=(
                     "silver",
                     lambda: wait_for_stable_many(
-                        SILVER_WATCH_TABLES, base_s_ts, "Silver"
+                        SILVER_WATCH_TABLES, base_s_ts, "Silver",
+                        t0, latest_data_delta_ts_ms_many,
                     ),
                 ),
                 daemon=True,

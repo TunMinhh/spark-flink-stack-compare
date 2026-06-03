@@ -26,8 +26,9 @@ PARALLELISM = int(os.environ.get("PARALLELISM", "6"))
 
 # Iceberg streaming source poll interval — lower = lower latency, more S3 LIST calls.
 # 10 s is a reasonable balance for benchmark; production might use 30 s.
-MONITOR_INTERVAL = os.environ.get("ICEBERG_MONITOR_INTERVAL", "15s")
-CHECKPOINT_INTERVAL = os.environ.get("FLINK_CHECKPOINT_INTERVAL", "15 s")
+MONITOR_INTERVAL    = os.environ.get("ICEBERG_MONITOR_INTERVAL",     "15s")
+CHECKPOINT_INTERVAL = os.environ.get("FLINK_CHECKPOINT_INTERVAL",    "15 s")
+CHECKPOINT_MIN_PAUSE = os.environ.get("FLINK_CHECKPOINT_MIN_PAUSE",  "5 s")
 REALTIME_TABLES = {
     "heart_rate_intraday",
     "hrv_intraday",
@@ -52,7 +53,7 @@ cfg = t_env.get_config().get_configuration()
 cfg.set_string("execution.checkpointing.interval",        CHECKPOINT_INTERVAL)
 cfg.set_string("execution.checkpointing.mode",            "EXACTLY_ONCE")
 cfg.set_string("execution.checkpointing.timeout",         "10 min")
-cfg.set_string("execution.checkpointing.min-pause",       "5 s")
+cfg.set_string("execution.checkpointing.min-pause",       CHECKPOINT_MIN_PAUSE)
 cfg.set_string("execution.checkpointing.max-concurrent-checkpoints", "1")
 cfg.set_string("state.checkpoints.dir",                   os.environ.get("FLINK_CHECKPOINT_DIR_SILVER", "hdfs://namenode:9000/checkpoints/flink/silver"))
 cfg.set_string("restart-strategy.type",                   "fixed-delay")

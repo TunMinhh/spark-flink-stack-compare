@@ -30,7 +30,7 @@ Pipeline A uses Spark Structured Streaming + Delta Lake + HDFS. Pipeline B uses 
 | Storage backend | HDFS | HDFS |
 | Warehouse path | `hdfs://namenode:9000/data/...` | `hdfs://namenode:9000/warehouse/iceberg` |
 | Main compute knob | `SHUFFLE_PARTITIONS=18` | `PARALLELISM=6` |
-| Trigger/checkpoint | Spark triggers `15s` | Flink checkpoints `15s` |
+| Trigger/checkpoint | Spark triggers `15s` | Flink checkpoints `5s` |
 | Gold target | `daily_intraday_summary` | `daily_intraday_summary` |
 
 Each request-rate tier starts from a clean pipeline state. Inside that tier, the warmup run and the three measured runs execute continuously without resetting state. This keeps rate `100` from inheriting table history from rate `50`, while still measuring steady behavior across repeated runs at the same rate.
@@ -245,16 +245,16 @@ rules, not guessed from metric names.
 
 | Metric | Meaning | How it is calculated |
 |---|---|---|
-| `gold_e2e_s` | End-to-end time until the pipeline is considered complete for the run. | Same value as `pipeline_e2e_s`; `max(bronze_done_s, silver_done_s, gold_done_s)` from producer start. |
-| `pipeline_e2e_s` | End-to-end completion time for Bronze, Silver, and Gold. | `max(t_bronze, t_silver, t_gold)`, measured from producer start. |
+| `gold_e2e_s` | Gold-ready service latency for the run. This is the headline E2E metric used in the report. | `producer_stop_s + gold_lag_s`, measured from producer start until the final observed Gold commit for that run. |
+| `pipeline_e2e_s` | End-to-end completion time for Bronze, Silver, and Gold. In the current result set it is close to `gold_e2e_s`, but it remains a separate full-pipeline settlement metric. | `max(t_bronze, t_silver, t_gold)`, measured from producer start. |
 | `producer_stop_s` | Time when the producer finished sending the burst. | Wall-clock seconds from producer start to producer process completion. |
 | `processing_overhead_s` | Catch-up time after input finished. | `max(0, pipeline_e2e_s - producer_stop_s)`. |
 | `bronze_lag_s` | Bronze catch-up lag after producer stop. | `max(0, t_bronze - producer_stop_s)`. |
 | `silver_lag_s` | Silver catch-up lag after producer stop. | `max(0, t_silver - producer_stop_s)`. |
 | `gold_lag_s` | Gold catch-up lag after producer stop. | `max(0, t_gold - producer_stop_s)`. |
 | `first_gold_latency_s` | Time to the first observed Gold commit/refresh. | First Gold commit wall-clock time from producer start; `-1` if not observed. |
-| `avg_staleness_s` | Average age of the latest Gold output, sampled from t=0 (raw, **not corrected**). Inflated by the inter-run idle gap; use `staleness_corrected.csv` for the paper-reported corrected values. | Average of all `now - latest_gold_commit_time` samples from producer start. |
-| `max_staleness_s` | Worst observed Gold staleness (raw, same caveat). | Maximum sampled staleness in seconds from t=0. |
+| `avg_staleness_s` | Average age of the latest Gold output, sampled by the benchmark runner. For paper figures, prefer the post-first-Gold values in `staleness_corrected.csv` when available. | Average of sampled `now - latest_gold_commit_time` values. |
+| `max_staleness_s` | Worst observed Gold staleness in the runner samples. | Maximum sampled staleness in seconds. |
 | `min_staleness_s` | Best observed Gold staleness. | Minimum sampled staleness in seconds. |
 | `catchup_ratio` | How many burst durations the pipeline needed to catch up after input ended. | `processing_overhead_s / warmup_secs`. Lower is better. |
 
@@ -340,10 +340,9 @@ python3 recompute_staleness.py
 
 - Exclude `is_warmup=true` rows from all reported averages.
 - Use only runs with `row_integrity_ok=true` for headline latency comparisons.
-- Use `corr_avg_s` / `corr_max_s` from `staleness_corrected.csv` for the
-  paper-reported staleness figures; `avg_staleness_s` in `results_*.csv` is
-  the raw (uncorrected) value.
-- `bronze_lag_s` and `silver_lag_s` for Pipeline A measure *table settlement
-  time* (includes empty end-of-trigger commits from Spark Structured
-  Streaming), not the instant the last data row was written. Pipeline B's
-  equivalent lags reflect data-processing time only.
+- Use `corr_avg_s` / `corr_max_s` from `staleness_corrected.csv` for
+  staleness charts that explicitly trim pre-first-Gold samples.
+- `bronze_lag_s` and `silver_lag_s` are layer catch-up measurements after the
+  producer stops. For Spark/Delta, they can include the cost of committing a
+  micro-batch to Delta; for Flink/Iceberg, they follow checkpoint/snapshot
+  completion.

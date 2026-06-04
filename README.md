@@ -9,7 +9,7 @@ data (heart rate, HRV, breathing; 71 users; 1,500–6,000 events/s).
 | Table format | Delta Lake | Apache Iceberg |
 | Storage | HDFS | HDFS |
 | Catalog | Delta transaction log | Iceberg REST (PostgreSQL) |
-| Trigger/checkpoint | 15 s (all layers) | 15 s checkpoint |
+| Trigger/checkpoint | 15 s trigger (all layers) | 5 s checkpoint |
 
 Both pipelines share the same HDFS backend and follow the same three-layer
 Medallion path:
@@ -30,19 +30,21 @@ critical path.
 
 | Metric | Flink (B) | Spark (A) | Ratio |
 |---|---|---|---|
-| End-to-end latency (6,000 e/s) | **58 s** | 116 s | 2.0× |
-| Bronze lag | **18 s** | 86 s | 4.7× |
-| Silver lag | **31 s** | 103 s | 3.4× |
-| Gold lag | **45 s** | 51 s | 1.1× |
-| Avg Gold staleness† | **20 s** | 52 s | 2.6× |
-| Data integrity | 100% | 100% | — |
+| Gold-ready E2E (6,000 e/s) | **32.1 s** | 63.1 s | 2.0x |
+| Bronze lag | **14.3 s** | 34.5 s | 2.4x |
+| Silver lag | **19.4 s** | 48.4 s | 2.5x |
+| Gold lag | **17.1 s** | 50.4 s | 3.0x |
+| Avg Gold staleness | **12.5 s** | 45.5 s | 3.6x |
+| Data integrity | 100% | 100% | - |
 
-†Staleness measured from the first Gold commit of each run
+Staleness is measured after the first Gold commit of each run
 (see `benchmark_result/recompute_staleness.py`).
 
-The gap lives entirely in the ingest layers. Once the Gold algorithm and
-cadence are equalised, both stacks commit within **1.1–1.3×** of each other at
-the aggregation layer.
+The comparison uses the stable operating cadence for each stack: Spark
+Structured Streaming runs with 15 s triggers, while Flink commits Iceberg
+snapshots through 5 s checkpoints. Flink is faster across Bronze, Silver, and
+Gold in this benchmark, with the largest user-visible difference appearing in
+Gold freshness.
 
 ## Fairness Controls Applied
 
@@ -50,8 +52,8 @@ Before measuring, four confounds were removed:
 
 1. **Gold algorithm** — Spark Gold changed from stateless full-table re-scan
    to the same stateful incremental aggregation Flink uses.
-2. **Trigger cadence** — All Spark triggers lowered to 15 s to match Flink's
-   checkpoint interval.
+2. **Stable cadence** — Spark uses 15 s triggers across Bronze/Silver/Gold;
+   Flink uses 5 s checkpoints across the benchmark path.
 3. **Small-file explosion** — Added `repartition(event_date)` to Bronze/Silver
    writes, matching Flink's Iceberg sink behaviour.
 4. **Workload dating** — Both producers now tag events with the ingestion date
@@ -65,8 +67,6 @@ pipeline_a/           Spark pipeline, services, benchmark runner
 pipeline_b/           Flink pipeline, services, benchmark runner
 benchmark_result/     Saved results, metric dictionary, analysis scripts
 data/                 Shared CSV source files
-generate_figures.py   Produces fig1_e2e_latency.png, fig1b_staleness.png,
-                      fig2_layer_lag.png from the saved result CSVs
 ```
 
 ### benchmark_result/
@@ -174,21 +174,17 @@ The raw `avg_staleness_s` in `results_*.csv` covers all samples from t=0 and
 is inflated by the inter-run idle gap; the corrected values are the ones
 reported in the paper.
 
-## Generating Figures
-
-```bash
-python3 generate_figures.py
-```
-
-Writes to `/mnt/c/Users/tranm/Downloads/`:
+## Figures Used in the Report
 
 ```text
-fig1_e2e_latency.png   End-to-end latency by load level
-fig1b_staleness.png    Corrected avg Gold staleness by load level
-fig2_layer_lag.png     Per-layer catch-up lag (Bronze/Silver/Gold)
+benchmark_result/_pptx_preview/e2e.png
+benchmark_result/_pptx_preview/staleness.png
+benchmark_result/_pptx_preview/layer_lag.png
+benchmark_result/_pptx_preview/slide11_ratio.png
 ```
 
-Staleness in `fig1b_staleness.png` uses values from `staleness_corrected.csv`.
+These figures reflect the current reported benchmark: Spark 15 s triggers and
+Flink 5 s checkpoints.
 
 ## Notes
 

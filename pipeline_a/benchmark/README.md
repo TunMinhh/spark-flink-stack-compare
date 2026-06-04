@@ -53,21 +53,23 @@ benchmark/staleness_YYYYMMDD_HHMMSS.csv
 benchmark/benchmark_YYYYMMDD_HHMMSS.log
 ```
 
-Primary metrics: `pipeline_e2e_s`, `processing_overhead_s`,
-`first_gold_latency_s`, `avg_staleness_s`, `max_staleness_s`,
-`row_integrity_ok`, `silver_to_bronze_ratio`, and `engine_ram_mb`.
+Primary metrics: `gold_e2e_s`, `pipeline_e2e_s`, `gold_lag_s`,
+`bronze_lag_s`, `silver_lag_s`, `first_gold_latency_s`,
+`avg_staleness_s`, `max_staleness_s`, `row_integrity_ok`,
+`silver_to_bronze_ratio`, and `engine_ram_mb`.
 
 ## Staleness Methodology
 
-`avg_staleness_s` in `results_*.csv` covers all samples from t=0, including
-the pre-Gold-commit ramp-up. For the corrected (post-first-Gold) staleness
-values used in the paper, run `benchmark_result/recompute_staleness.py` after
-collecting results — it outputs `benchmark_result/staleness_corrected.csv`.
+`avg_staleness_s` and `max_staleness_s` in `results_*.csv` are the staleness
+metrics used by the current saved benchmark result set and report figures.
+New benchmark runs may also emit timestamped `staleness_*.csv` files for
+sample-level inspection; those raw files are optional and are not required for
+the checked-in summary tables.
 
 ## Delta Row Count
 
 `benchmark.py` uses an incremental Delta log scan (`_delta_file_map` cache)
 that reads only log files with index greater than the last-scanned index.
 This keeps the between-run overhead to O(new log files) rather than
-O(all log files), which was the source of inflated inter-run gaps in earlier
-versions of the harness.
+O(all log files), so the benchmark focuses on streaming work rather than
+re-counting table history.

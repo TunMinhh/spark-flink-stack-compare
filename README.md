@@ -37,8 +37,8 @@ critical path.
 | Avg Gold staleness | **12.5 s** | 45.5 s | 3.6x |
 | Data integrity | 100% | 100% | - |
 
-Staleness is measured after the first Gold commit of each run
-(see `benchmark_result/recompute_staleness.py`).
+The staleness values above are taken from the checked-in result CSVs used to
+render the current report figures.
 
 The comparison uses the stable operating cadence for each stack: Spark
 Structured Streaming runs with 15 s triggers, while Flink commits Iceberg
@@ -48,10 +48,10 @@ Gold freshness.
 
 ## Fairness Controls Applied
 
-Before measuring, four confounds were removed:
+The benchmark uses these controls so both stacks process the same workload:
 
-1. **Gold algorithm** — Spark Gold changed from stateless full-table re-scan
-   to the same stateful incremental aggregation Flink uses.
+1. **Gold algorithm** — Both pipelines use stateful incremental aggregation
+   for `daily_intraday_summary`.
 2. **Stable cadence** — Spark uses 15 s triggers across Bronze/Silver/Gold;
    Flink uses 5 s checkpoints across the benchmark path.
 3. **Small-file explosion** — Added `repartition(event_date)` to Bronze/Silver
@@ -65,7 +65,7 @@ Before measuring, four confounds were removed:
 ```text
 pipeline_a/           Spark pipeline, services, benchmark runner
 pipeline_b/           Flink pipeline, services, benchmark runner
-benchmark_result/     Saved results, metric dictionary, analysis scripts
+benchmark_result/     Saved results, figures, and metric dictionary
 data/                 Shared CSV source files
 ```
 
@@ -73,11 +73,8 @@ data/                 Shared CSV source files
 
 ```text
 spark_result/{50,100,200}_result.csv      Per-run metrics, Pipeline A
-spark_result/{50,100,200}_staleness.csv   Raw staleness samples, Pipeline A
 flink_result/{50,100,200}_result.csv      Per-run metrics, Pipeline B
-flink_result/{50,100,200}_staleness.csv   Raw staleness samples, Pipeline B
-staleness_corrected.csv                   Corrected staleness (post-first-Gold)
-recompute_staleness.py                    Script to recompute corrected staleness
+figures/*.png                             Report/slide figures generated from results
 README.md                                 Metric dictionary and benchmark plan
 ```
 
@@ -118,7 +115,8 @@ docker compose up -d --build
 sleep 60
 make init
 PYTHONUNBUFFERED=1 REQUEST_RATES=5 N_RUNS=1 WARMUP_RUNS=0 WARMUP_SECS=10 \
-  PARALLELISM=6 bash benchmark/run_benchmark.sh
+  FLINK_CHECKPOINT_INTERVAL="5 s" FLINK_CHECKPOINT_INTERVAL_SECONDS=5 \
+  GOLD_CHECKPOINT_SECONDS=5 PARALLELISM=6 bash benchmark/run_benchmark.sh
 ```
 
 Pass criteria for both: `Bronze rows > 0`, `Silver rows > 0`,
@@ -144,7 +142,9 @@ done
 for rate in 50 100 200; do
   docker compose down -v && docker compose up -d && sleep 60 && make init
   PYTHONUNBUFFERED=1 REQUEST_RATES=$rate N_RUNS=3 WARMUP_RUNS=1 WARMUP_SECS=10 \
-    STABLE_MAX_WAIT=800 PARALLELISM=6 bash benchmark/run_benchmark.sh
+    STABLE_MAX_WAIT=800 FLINK_CHECKPOINT_INTERVAL="5 s" \
+    FLINK_CHECKPOINT_INTERVAL_SECONDS=5 GOLD_CHECKPOINT_SECONDS=5 \
+    PARALLELISM=6 bash benchmark/run_benchmark.sh
 done
 ```
 
@@ -156,31 +156,26 @@ Rate mapping (default `DELAY=0.1`):
 | 100 | 3,000 |
 | 200 | 6,000 |
 
-## Recomputing Corrected Staleness
+## Saved Benchmark Files
 
-After collecting results, run:
+The checked-in benchmark result set keeps the final per-run CSV files only:
 
-```bash
-cd benchmark_result
-python3 recompute_staleness.py
+```text
+benchmark_result/spark_result/{50,100,200}_result.csv
+benchmark_result/flink_result/{50,100,200}_result.csv
+benchmark_result/figures/*.png
 ```
 
-This reads `staleness_*.csv` and `results_*.csv` from `spark_result/` and
-`flink_result/`, filters each run's staleness samples to those at or after
-the first Gold commit (`wall_s >= first_gold_latency_s`), and writes
-`staleness_corrected.csv` with per-run corrected avg/max/min values.
-
-The raw `avg_staleness_s` in `results_*.csv` covers all samples from t=0 and
-is inflated by the inter-run idle gap; the corrected values are the ones
-reported in the paper.
+`is_warmup=true` rows are kept for traceability but excluded from reported
+averages. The headline figures use the three measured runs per load level.
 
 ## Figures Used in the Report
 
 ```text
-benchmark_result/_pptx_preview/e2e.png
-benchmark_result/_pptx_preview/staleness.png
-benchmark_result/_pptx_preview/layer_lag.png
-benchmark_result/_pptx_preview/slide11_ratio.png
+benchmark_result/figures/e2e.png
+benchmark_result/figures/staleness.png
+benchmark_result/figures/layer_lag.png
+benchmark_result/figures/spark_flink_ratio.png
 ```
 
 These figures reflect the current reported benchmark: Spark 15 s triggers and

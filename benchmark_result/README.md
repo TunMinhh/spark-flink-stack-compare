@@ -74,6 +74,7 @@ for rate in 50 100 200; do
   N_RUNS=3 \
   WARMUP_RUNS=1 \
   WARMUP_SECS=10 \
+  STABLE_MAX_WAIT=800 \
   SHUFFLE_PARTITIONS=18 \
   PYTHONUNBUFFERED=1 \
   bash benchmark/run_benchmark.sh
@@ -116,6 +117,9 @@ REQUEST_RATES=200 \
 N_RUNS=1 \
 WARMUP_RUNS=0 \
 WARMUP_SECS=10 \
+FLINK_CHECKPOINT_INTERVAL="5 s" \
+FLINK_CHECKPOINT_INTERVAL_SECONDS=5 \
+GOLD_CHECKPOINT_SECONDS=5 \
 PARALLELISM=6 \
 bash benchmark/run_benchmark.sh
 ```
@@ -135,6 +139,10 @@ for rate in 50 100 200; do
   N_RUNS=3 \
   WARMUP_RUNS=1 \
   WARMUP_SECS=10 \
+  STABLE_MAX_WAIT=800 \
+  FLINK_CHECKPOINT_INTERVAL="5 s" \
+  FLINK_CHECKPOINT_INTERVAL_SECONDS=5 \
+  GOLD_CHECKPOINT_SECONDS=5 \
   PARALLELISM=6 \
   PYTHONUNBUFFERED=1 \
   bash benchmark/run_benchmark.sh
@@ -187,18 +195,29 @@ sudo apt install -y tmux
 
 ## Results
 
-Each rate produces its own timestamped output set:
+Each new benchmark run can produce its own timestamped output set inside the
+selected pipeline's `benchmark/` directory:
 
 ```bash
-ls -lt benchmark/results_*.csv benchmark/staleness_*.csv benchmark/benchmark_*.log | head
+ls -lt benchmark/results_*.csv benchmark/benchmark_*.log 2>/dev/null | head
 ```
 
-Keep these files for each rate and pipeline:
+Archive these files when you need raw run logs:
 
 ```text
 results_YYYYMMDD_HHMMSS.csv
 staleness_YYYYMMDD_HHMMSS.csv
 benchmark_YYYYMMDD_HHMMSS.log
+staleness_YYYYMMDD_HHMMSS.csv  # optional raw freshness samples
+```
+
+The checked-in final result set in this repository is stored as consolidated
+per-rate files:
+
+```text
+spark_result/{50,100,200}_result.csv
+flink_result/{50,100,200}_result.csv
+figures/*.png
 ```
 
 Primary metrics:
@@ -245,15 +264,15 @@ rules, not guessed from metric names.
 
 | Metric | Meaning | How it is calculated |
 |---|---|---|
-| `gold_e2e_s` | Gold-ready service latency for the run. This is the headline E2E metric used in the report. | `producer_stop_s + gold_lag_s`, measured from producer start until the final observed Gold commit for that run. |
-| `pipeline_e2e_s` | End-to-end completion time for Bronze, Silver, and Gold. In the current result set it is close to `gold_e2e_s`, but it remains a separate full-pipeline settlement metric. | `max(t_bronze, t_silver, t_gold)`, measured from producer start. |
+| `gold_e2e_s` | Runner-reported E2E latency. In the current benchmark code this is written with the same value as `pipeline_e2e_s`. | `t_pipeline`, where `t_pipeline = max(t_bronze, t_silver, t_gold)`, measured from producer start. |
+| `pipeline_e2e_s` | End-to-end completion time for Bronze, Silver, and Gold. | `max(t_bronze, t_silver, t_gold)`, measured from producer start. |
 | `producer_stop_s` | Time when the producer finished sending the burst. | Wall-clock seconds from producer start to producer process completion. |
 | `processing_overhead_s` | Catch-up time after input finished. | `max(0, pipeline_e2e_s - producer_stop_s)`. |
 | `bronze_lag_s` | Bronze catch-up lag after producer stop. | `max(0, t_bronze - producer_stop_s)`. |
 | `silver_lag_s` | Silver catch-up lag after producer stop. | `max(0, t_silver - producer_stop_s)`. |
 | `gold_lag_s` | Gold catch-up lag after producer stop. | `max(0, t_gold - producer_stop_s)`. |
 | `first_gold_latency_s` | Time to the first observed Gold commit/refresh. | First Gold commit wall-clock time from producer start; `-1` if not observed. |
-| `avg_staleness_s` | Average age of the latest Gold output, sampled by the benchmark runner. For paper figures, prefer the post-first-Gold values in `staleness_corrected.csv` when available. | Average of sampled `now - latest_gold_commit_time` values. |
+| `avg_staleness_s` | Average age of the latest Gold output, sampled by the benchmark runner. This is the staleness value used by the current checked-in result CSVs and figures. | Average of sampled `now - latest_gold_commit_time` values. |
 | `max_staleness_s` | Worst observed Gold staleness in the runner samples. | Maximum sampled staleness in seconds. |
 | `min_staleness_s` | Best observed Gold staleness. | Minimum sampled staleness in seconds. |
 | `catchup_ratio` | How many burst durations the pipeline needed to catch up after input ended. | `processing_overhead_s / warmup_secs`. Lower is better. |
@@ -291,10 +310,11 @@ rules, not guessed from metric names.
 | `engine_ram_mb` | Peak RAM of the main processing engine container. | Spark: `spark-worker`; Flink: `flink-taskmanager`. Sampled from Docker stats during the run. |
 | `coord_ram_mb` | Peak RAM of the coordinator/master container. | Spark: `spark-master`; Flink: `flink-jobmanager`. Sampled from Docker stats during the run. |
 
-### Staleness CSV
+### Staleness Samples
 
-The `staleness_*.csv` files store the raw per-sample data; every sample from
-t=0 is included (pre-Gold-commit samples and post-Gold-commit samples alike).
+The benchmark runner may emit `staleness_*.csv` files during a fresh run. These
+files store raw per-sample freshness observations and are useful for deeper
+debugging, but they are not required for the checked-in summary tables.
 
 | Column | Meaning |
 |---|---|
@@ -306,42 +326,12 @@ t=0 is included (pre-Gold-commit samples and post-Gold-commit samples alike).
 | `wall_s` | Seconds from producer start when this sample was recorded. |
 | `staleness_s` | `now - latest_observed_gold_commit_time` at sample time. Lower = fresher. |
 
-### Corrected Staleness
-
-`staleness_corrected.csv` is produced by `recompute_staleness.py`. It joins
-the raw staleness samples with `first_gold_latency_s` from `results_*.csv` and
-keeps only samples where `wall_s >= first_gold_latency_s` for each run. This
-removes Phase 1 (pre-first-Gold-commit) samples whose staleness reflects the
-inter-run idle gap rather than pipeline-induced freshness delay.
-
-| Column | Meaning |
-|---|---|
-| `rate` | `users_per_tick` (50 / 100 / 200). |
-| `pipeline` | `spark` or `flink`. |
-| `run_label` | Same as staleness CSV. |
-| `is_warmup` | Same as staleness CSV. |
-| `first_gold_latency_s` | Wall time of first Gold commit; used as the trim boundary. |
-| `n_samples_total` | Total samples in the raw staleness CSV for this run. |
-| `n_samples_post_first_gold` | Samples at or after first Gold commit. |
-| `corr_avg_s` | Corrected average staleness (post-first-Gold only). |
-| `corr_max_s` | Corrected max staleness. |
-| `corr_min_s` | Corrected min staleness. |
-| `orig_avg_s` | Original (raw) average staleness for comparison. |
-| `orig_max_s` | Original max staleness for comparison. |
-
-To regenerate:
-
-```bash
-cd benchmark_result
-python3 recompute_staleness.py
-```
-
 ### Interpretation Rules
 
 - Exclude `is_warmup=true` rows from all reported averages.
 - Use only runs with `row_integrity_ok=true` for headline latency comparisons.
-- Use `corr_avg_s` / `corr_max_s` from `staleness_corrected.csv` for
-  staleness charts that explicitly trim pre-first-Gold samples.
+- Use `avg_staleness_s` and `max_staleness_s` from the checked-in
+  `{50,100,200}_result.csv` files for the current report figures.
 - `bronze_lag_s` and `silver_lag_s` are layer catch-up measurements after the
   producer stops. For Spark/Delta, they can include the cost of committing a
   micro-batch to Delta; for Flink/Iceberg, they follow checkpoint/snapshot
